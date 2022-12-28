@@ -7,34 +7,29 @@ import (
 	"strings"
 )
 
-func GetRealRemoteAddr(r *http.Request) (xforAddr string) {
-	//xforAddr = r.Header.Get("X-Forwarded-Ip")
-	////if xforAddr != "" {
-	////	return
-	////}
-
-	xforAddr = r.Header.Get("X-Client-IP")
-	if xforAddr != "" {
+func GetRealRemoteAddr(r *http.Request) (addr string) {
+	addr = r.Header.Get("X-Forwarded-Ip")
+	if addr != "" {
 		return
 	}
 
-	//xforAddr = r.Header.Get("HTTP-CLIENT-IP")
-	//if xforAddr != "" {
-	//	return
-	//}
-	//
-	//xforAddr = r.Header.Get("x-Original-Forwarded-For")
-	//if xforAddr != "" {
-	//	return
-	//}
-	//
-	//xforAddr = r.Header.Get("X-Forwarded-For")
-	//if xforAddr != "" {
-	//	return
-	//}
+	addr = r.Header.Get("X-Client-IP")
+	if addr != "" {
+		return
+	}
 
-	xforAddr = r.Header.Get("X-Real-IP")
-	if xforAddr != "" {
+	addr = r.Header.Get("x-Original-Forwarded-For")
+	if addr != "" {
+		return
+	}
+
+	addr = r.Header.Get("X-Forwarded-For")
+	if addr != "" {
+		return
+	}
+
+	addr = r.Header.Get("X-Real-IP")
+	if addr != "" {
 		return
 	}
 

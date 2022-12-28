@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -20,12 +21,15 @@ func (c *CacheItem[T]) removeItem() {
 }
 
 func (c *CacheItem[T]) expire(duration time.Duration) {
+	curChan := time.After(duration)
+	c.expireChan = curChan
 	go func() {
-		curChan := time.After(duration)
-		c.expireChan = curChan
-		<-c.expireChan
+		<-curChan
 		if curChan == c.expireChan {
-			c.removeItem()
+			go c.cache.Delete(c.Key)
+			if c.cache.expireHandler != nil {
+				c.cache.expireHandler(c.Key, c.Value)
+			}
 		}
 	}()
 }
@@ -34,15 +38,21 @@ func newCacheItem[T any](ctx context.Context, key string, value T, cache *Cache[
 	item := &CacheItem[T]{Key: key, Value: value, cache: cache}
 	item.SetCtx(ctx)
 	item.SetOnClose(func() {
+		log.Println("cache.Delete")
 		cache.Delete(key)
 	})
 	return item
 }
 
 type Cache[T any] struct {
-	cacheMap  map[string]*CacheItem[T]
-	mapLocker sync.Mutex
+	cacheMap      map[string]*CacheItem[T]
+	mapLocker     sync.Mutex
+	expireHandler func(key string, value any)
 	Closer
+}
+
+func (s *Cache[T]) SetExpireHandler(expireHandler func(key string, value any)) {
+	s.expireHandler = expireHandler
 }
 
 func (s *Cache[T]) Get(key string) T {
