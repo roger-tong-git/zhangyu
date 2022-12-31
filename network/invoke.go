@@ -58,7 +58,7 @@ func NewErrorResponse(r *InvokeRequest, message string) *InvokeResponse {
 	}
 }
 
-type InvokeHandler func(request *InvokeRequest) *InvokeResponse
+type InvokeHandler func(invoker *Invoker, request *InvokeRequest) *InvokeResponse
 
 type InvokeResponse struct {
 	RequestId     string
@@ -257,8 +257,18 @@ func (r *InvokeRoute) GetHandler(path string) InvokeHandler {
 	return r.handlers[strings.ToLower(strings.TrimSpace(path))]
 }
 
+func (r *InvokeRoute) HasInvoke(connId string) bool {
+	defer r.invokerLock.Unlock()
+	r.invokerLock.Lock()
+	_, ok := r.invokes[connId]
+	return ok
+}
+
 func (r *InvokeRoute) dispatchInvoke(invoker *Invoker) {
 	for {
+		if !r.HasInvoke(invoker.connId) {
+			break
+		}
 		req, resp, err := invoker.readInvoke()
 		if err != nil {
 			invoker.CtxCancel()
@@ -270,7 +280,7 @@ func (r *InvokeRoute) dispatchInvoke(invoker *Invoker) {
 					handler := r.GetHandler(strings.TrimSpace(strings.ToLower(req.Path)))
 					var callResp *InvokeResponse
 					if handler != nil {
-						callResp = handler(req)
+						callResp = handler(invoker, req)
 					} else {
 						str := fmt.Sprintf("无效的路由：%v", req.Path)
 						callResp = NewInvokeResponse(req.RequestId, InvokeResult_Error, str)

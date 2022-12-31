@@ -16,7 +16,12 @@ type TransportClient struct {
 	invokeRoute *InvokeRoute
 	connected   bool
 	lastAddr    string
+	onConnected func()
 	utils.Closer
+}
+
+func (w *TransportClient) SetOnConnected(onConnected func()) {
+	w.onConnected = onConnected
 }
 
 func (w *TransportClient) Connected() bool {
@@ -67,10 +72,13 @@ func (w *TransportClient) ConnectTo(addr string) error {
 		if stream, err1 := session.OpenStream(); err1 != nil {
 			return err1
 		} else {
-			w.connected = true
 			w.lastAddr = addr
 			invoker := w.invokeRoute.AddInvoker(w.clientInfo.ConnectionId, stream, stream)
 			w.invokeRoute.SetDefaultInvoker(invoker)
+			w.connected = true
+			if w.onConnected != nil {
+				w.onConnected()
+			}
 
 			go func() {
 				select {
@@ -88,9 +96,19 @@ func (w *TransportClient) ConnectTo(addr string) error {
 	return nil
 }
 
+func (w *TransportClient) initEvents() {
+	w.invokeRoute.AddHandler("/client/kick", w.onKick)
+}
+
+func (w *TransportClient) onKick(invoker *Invoker, request *InvokeRequest) *InvokeResponse {
+	go log.Fatalln("有新的客户端上线，当前客户端已被踢下线")
+	return NewSuccessResponse(request, "")
+}
+
 func NewWebSocketClient(ctx context.Context, clientInfo *ClientConnInfo) *TransportClient {
 	w := &TransportClient{clientInfo: clientInfo}
 	w.SetCtx(ctx)
 	w.invokeRoute = NewInvokeRoute(w.Ctx())
+	w.initEvents()
 	return w
 }

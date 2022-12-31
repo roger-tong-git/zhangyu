@@ -21,19 +21,22 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Node struct {
-	TerminalId      string //设备ID
-	EtcdUri         string //Etcd连接字符串
-	ServerPort      int
-	ClientTimeOut   int
-	connectionId    string
-	invokeRoute     *network.InvokeRoute
-	etcdOp          *EtcdOp
-	h3Server        *http3.Server
-	clients         *utils.Cache[*network.ClientConnInfo]
+	TerminalId    string //设备ID
+	EtcdUri       string //Etcd连接字符串
+	ServerPort    int
+	ClientTimeOut int
+	connectionId  string
+	invokeRoute   *network.InvokeRoute
+	etcdOp        *EtcdOp
+	h3Server      *http3.Server
+	clients       *utils.Cache[*ClientSession]
+	clientIdMaps  sync.Map //维护一份简单的列表，记得客户端TerminalId与客户端ConnectionId的对应关系，
+	//如果ConnectionId发生改变，则说明客户端有新的进程登录或是在别处登录，需要踢掉之前的客户端
 	transportServer *webtransport.Server
 	utils.Closer
 }
@@ -79,9 +82,17 @@ func (s *Node) generateTLSConfig() {
 }
 
 func (s *Node) onClientExpire(_ string, value any) {
-	cli := value.(*network.ClientConnInfo)
+	cli := value.(*ClientSession)
 	log.Println("准备移除客户端:", cli.TunnelId)
 	key1 := fmt.Sprintf("%v/%v", EtcdKey_Client_Connection, cli.TunnelId)
+	if v, ok := s.clientIdMaps.Load(cli.TerminalId); ok {
+		oldConnId := v.(string)
+		if oldConnId == cli.ConnectionId {
+			s.clientIdMaps.Delete(cli.TerminalId)
+		}
+	}
+
+	s.clientIdMaps.Delete(cli.TerminalId)
 	if resp, _ := s.etcdOp.GetValue(key1); resp != nil && resp.Count > 0 {
 		kv := resp.Kvs[0]
 		sCli := &network.ClientConnInfo{}
@@ -99,8 +110,9 @@ func NewNode(ctx context.Context) *Node {
 	node.SetOnClose(node.OnClose)
 	node.invokeRoute = network.NewInvokeRoute(node.Ctx())
 	node.connectionId = uuid.New().String()
-	node.clients = utils.NewCache[*network.ClientConnInfo](node.Ctx())
+	node.clients = utils.NewCache[*ClientSession](node.Ctx())
 	node.clients.SetExpireHandler(node.onClientExpire)
+	node.clientIdMaps = sync.Map{}
 
 	utils.ReadJsonSetting("node.json", node, func() {
 		node.TerminalId = uuid.New().String()
@@ -143,6 +155,7 @@ func (s *Node) initEtcd() {
 		_, leaseId := s.etcdOp.CreateLease(5, true)
 		_, _ = s.etcdOp.PutValueWithLease(s.etcdOp.GetNodeKey(s.TerminalId), nodeInfo, leaseId)
 		s.etcdOp.AddWatcher(EtcdKey_Node, s.nodeWatcher)
+		s.etcdOp.AddWatcher(EtcdKey_Client_Connection, s.clientLoginWatcher)
 	} else {
 		log.Panicln("没有配置Etcd连接")
 	}
@@ -208,7 +221,7 @@ func (s *Node) initHttp() {
 	}()
 }
 
-func (s *Node) checkClient(cliInfo *network.ClientConnInfo, isNew bool) bool {
+func (s *Node) checkClientLogin(cliInfo *ClientSession, isNew bool) bool {
 	key := fmt.Sprintf("%v/%v", EtcdKey_Client_Record, cliInfo.TerminalId)
 	clientInfo := &network.ClientInfo{}
 	exists := s.etcdOp.GetJsonValue(key, clientInfo)
@@ -226,10 +239,10 @@ func (s *Node) checkClient(cliInfo *network.ClientConnInfo, isNew bool) bool {
 }
 
 // 新的客户端连接
-func (s *Node) clientRegister(r *network.InvokeRequest) *network.InvokeResponse {
-	cliInfo := &network.ClientConnInfo{}
+func (s *Node) clientRegister(invoker *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
+	cliInfo := &ClientSession{ClientInvoker: invoker}
 	utils.GetJsonValue(cliInfo, r.BodyJson)
-	if !s.checkClient(cliInfo, true) {
+	if !s.checkClientLogin(cliInfo, true) {
 		return network.NewErrorResponse(r, "Token信息不正确,注册失败")
 	}
 
@@ -256,10 +269,10 @@ func (s *Node) clientRegister(r *network.InvokeRequest) *network.InvokeResponse 
 }
 
 // clientLogin 已有的客户端登录
-func (s *Node) clientLogin(r *network.InvokeRequest) *network.InvokeResponse {
-	cliInfo := &network.ClientConnInfo{}
+func (s *Node) clientLogin(invoker *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
+	cliInfo := &ClientSession{ClientInvoker: invoker}
 	utils.GetJsonValue(cliInfo, r.BodyJson)
-	if !s.checkClient(cliInfo, false) {
+	if !s.checkClientLogin(cliInfo, false) {
 		return network.NewErrorResponse(r, "Token信息不正确,注册失败")
 	}
 	cliInfo.NodeId = s.TerminalId
@@ -267,18 +280,35 @@ func (s *Node) clientLogin(r *network.InvokeRequest) *network.InvokeResponse {
 	return re
 }
 
-func (s *Node) updateClients(r *network.InvokeRequest, cliInfo *network.ClientConnInfo) *network.InvokeResponse {
+func (s *Node) updateClients(r *network.InvokeRequest, cliInfo *ClientSession) *network.InvokeResponse {
+	if v, ok := s.clientIdMaps.Load(cliInfo.TerminalId); ok {
+		curConnectionId := cliInfo.ConnectionId
+		oldConnectionId := v.(string)
+		if oldConnectionId != curConnectionId {
+			if oldCli := s.clients.Get(oldConnectionId); oldCli != nil {
+				Req := network.NewInvokeRequest(uuid.New().String(), "/client/kick")
+				go func() {
+					_, _ = oldCli.ClientInvoker.Invoke(Req)
+				}()
+				time.Sleep(time.Millisecond * 100)
+				s.invokeRoute.RemoveInvoker(oldConnectionId)
+				log.Println(fmt.Sprintf("通知客户端[%v]下线", oldConnectionId))
+			}
+		}
+	}
+
 	connKey := fmt.Sprintf("%v/%v", EtcdKey_Client_Connection, cliInfo.TunnelId)
 	_, leaseID := s.etcdOp.CreateLease(s.ClientTimeOut, true)
 	_, _ = s.etcdOp.PutValueWithLease(connKey, cliInfo, leaseID)
 	re := network.NewSuccessResponse(r, cliInfo)
 	log.Println(fmt.Sprintf("客户端[%v]注册成功，分配通道ID[%v]", cliInfo.TerminalId, cliInfo.TunnelId))
 	s.clients.Set(cliInfo.ConnectionId, cliInfo)
+	s.clientIdMaps.Store(cliInfo.TerminalId, cliInfo.ConnectionId)
 	s.clients.SetExpire(cliInfo.ConnectionId, time.Second*time.Duration(s.ClientTimeOut))
 	return re
 }
 
-func (s *Node) clientSayOnline(r *network.InvokeRequest) *network.InvokeResponse {
+func (s *Node) clientSayOnline(_ *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
 	cliInfo := &network.ClientConnInfo{}
 	utils.GetJsonValue(cliInfo, r.BodyJson)
 
@@ -291,4 +321,18 @@ func (s *Node) clientSayOnline(r *network.InvokeRequest) *network.InvokeResponse
 	}
 
 	return network.NewSuccessResponse(r, "")
+}
+
+func (s *Node) clientLoginWatcher(eventType string, key string, value []byte) {
+	if eventType != "PUT" {
+		return
+	}
+
+	cliInfo := &network.ClientConnInfo{}
+	utils.GetJsonValue(cliInfo, string(value))
+	//如果登录的ID在当前节点，说明登录时已处理过，不需要再处理
+	if cliInfo.NodeId == s.TerminalId {
+		return
+	}
+
 }
