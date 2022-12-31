@@ -2,7 +2,6 @@ package utils
 
 import (
 	"context"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -38,7 +37,6 @@ func newCacheItem[T any](ctx context.Context, key string, value T, cache *Cache[
 	item := &CacheItem[T]{Key: key, Value: value, cache: cache}
 	item.SetCtx(ctx)
 	item.SetOnClose(func() {
-		log.Println("cache.Delete")
 		cache.Delete(key)
 	})
 	return item

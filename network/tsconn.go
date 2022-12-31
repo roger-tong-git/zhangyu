@@ -12,16 +12,12 @@ import (
 )
 
 type TransportClient struct {
-	clientInfo  *ClientConnInfo
-	invokeRoute *InvokeRoute
-	connected   bool
-	lastAddr    string
-	onConnected func()
+	clientInfo       *ClientConnInfo
+	invokeRoute      *InvokeRoute
+	connected        bool
+	lastAddr         string
+	connectedHandler func()
 	utils.Closer
-}
-
-func (w *TransportClient) SetOnConnected(onConnected func()) {
-	w.onConnected = onConnected
 }
 
 func (w *TransportClient) Connected() bool {
@@ -44,16 +40,18 @@ func (w *TransportClient) Invoke(r *InvokeRequest) *InvokeResponse {
 	re, err := w.invokeRoute.defaultInvoker.Invoke(r)
 	if err != nil && err == WebTransportConnectError && w.lastAddr != "" {
 		go func() {
-			log.Println("尝试重新连接到服务端")
-			w.connected = false
-			_ = w.ConnectTo(w.lastAddr)
+			if w.connected {
+				log.Println("检测到服务器断开,尝试重新连接到服务端")
+				w.connected = false
+				_ = w.ConnectTo(w.lastAddr, w.connectedHandler)
+			}
 		}()
 		return NewInvokeResponse(r.RequestId, InvokeResult_Error, err.Error())
 	}
 	return re
 }
 
-func (w *TransportClient) ConnectTo(addr string) error {
+func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) error {
 	var err error
 	header := http.Header{}
 	header.Set(HeadKey_TerminalId, w.clientInfo.TerminalId)
@@ -76,8 +74,9 @@ func (w *TransportClient) ConnectTo(addr string) error {
 			invoker := w.invokeRoute.AddInvoker(w.clientInfo.ConnectionId, stream, stream)
 			w.invokeRoute.SetDefaultInvoker(invoker)
 			w.connected = true
-			if w.onConnected != nil {
-				w.onConnected()
+			if connectedHandler != nil {
+				w.connectedHandler = connectedHandler
+				connectedHandler()
 			}
 
 			go func() {
@@ -85,7 +84,7 @@ func (w *TransportClient) ConnectTo(addr string) error {
 				case <-invoker.Ctx().Done():
 					return
 				default:
-					_ = w.ConnectTo(addr)
+					_ = w.ConnectTo(addr, w.connectedHandler)
 				}
 			}()
 		}

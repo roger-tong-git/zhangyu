@@ -67,7 +67,8 @@ func (c *Client) Connect() error {
 	cliInfo.Type = network.TerminalType_Client
 	go c.sayOnline()
 	c.transportCli = network.NewWebSocketClient(c.Ctx(), cliInfo)
-	c.transportCli.SetOnConnected(func() {
+
+	if err := c.transportCli.ConnectTo(c.NodeAddr, func() {
 		time.Sleep(time.Second)
 		path := "/client/register"
 		if c.Token != "" || c.TunnelId != "" {
@@ -86,9 +87,7 @@ func (c *Client) Connect() error {
 			utils.SaveJsonSetting("client.json", c)
 			log.Println(fmt.Sprintf("客户端ID[%v]注册成功,获得通道ID[%v]", c.TunnelId, c.TerminalId))
 		}
-	})
-
-	if err := c.transportCli.ConnectTo(c.NodeAddr); err != nil {
+	}); err != nil {
 		log.Println("连接到服务端失败,稍后将重试")
 		return err
 	}
