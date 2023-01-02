@@ -80,7 +80,6 @@ func (w *TransportClient) dial(addr string, connId string, connType string, conn
 
 func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 	_ = w.dial(addr, w.clientInfo.ConnectionId, Connection_Command, func(invoker *Invoker) {
-
 		w.invokeRoute.SetDefaultInvoker(invoker)
 		go w.invokeRoute.DispatchInvoke(invoker)
 		if connectedHandler != nil {
@@ -235,9 +234,6 @@ func (w *TransportClient) AppendTransferMap(tq *TransferRequest) error {
 							}
 
 							transferStream.Transfer()
-							_ = invoker.transportConn.Close()
-							_ = conn.Close()
-							_ = invoker.Close()
 						})
 					}()
 				}
@@ -279,16 +275,15 @@ func (w *TransportClient) AppendTransferStart(connId string, tq *TransferRequest
 
 	return w.dial(w.lastAddr, connId, Connection_Instance_Target, func(invoker *Invoker) {
 		go func() {
-			transferStream := NewTransferStream(connId, invoker, conn)
-			transferStream.Transfer()
-			_ = invoker.transportConn.Close()
-			_ = invoker.Close()
-			_ = conn.Close()
+			if sourceUrl.Scheme == "tcp" {
+				transferStream := NewTransferStream(connId, invoker, conn)
+				transferStream.Transfer()
+			}
 		}()
 	})
 }
 
-func (w *TransportClient) onTransferMapStart(invoker *Invoker, r *InvokeRequest) *InvokeResponse {
+func (w *TransportClient) onTransferMapStart(_ *Invoker, r *InvokeRequest) *InvokeResponse {
 	transferMapReq := &TransferRequest{}
 	utils.GetJsonValue(transferMapReq, r.BodyJson)
 	connId := r.Header["ConnectionId"]

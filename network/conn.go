@@ -78,6 +78,11 @@ func (t *TransferRequest) GetTargetUrl() *url.URL {
 	return uri
 }
 
+type ReadWriter interface {
+	io.ReadWriter
+	io.Closer
+}
+
 // WebtransportConn 将Webtransport的session/stream包装成net.conn接口
 type WebtransportConn struct {
 	session *webtransport.Session
@@ -130,11 +135,27 @@ func (w *WebtransportConn) SetWriteDeadline(t time.Time) error {
 
 type TransferStream struct {
 	transferId   string
-	sourceStream io.ReadWriter
-	targetStream io.ReadWriter
+	sourceStream ReadWriter
+	targetStream ReadWriter
 }
 
-func NewTransferStream(transferId string, sourceStream io.ReadWriter, targetStream io.ReadWriter) *TransferStream {
+func (t *TransferStream) SetTargetStream(targetStream ReadWriter) {
+	t.targetStream = targetStream
+}
+
+func (t *TransferStream) TransferId() string {
+	return t.transferId
+}
+
+func (t *TransferStream) SourceStream() ReadWriter {
+	return t.sourceStream
+}
+
+func (t *TransferStream) TargetStream() ReadWriter {
+	return t.targetStream
+}
+
+func NewTransferStream(transferId string, sourceStream ReadWriter, targetStream ReadWriter) *TransferStream {
 	return &TransferStream{transferId: transferId, sourceStream: sourceStream, targetStream: targetStream}
 }
 
@@ -162,4 +183,6 @@ func (t *TransferStream) Transfer() {
 	}()
 
 	<-errChan
+	_ = t.targetStream.Close()
+	_ = t.sourceStream.Close()
 }
