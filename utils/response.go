@@ -16,6 +16,10 @@ func ErrResponse(message string) *ResponseBase {
 	return &ResponseBase{Status: ResponseError, Message: message}
 }
 
+func SuccessResponse() *ResponseBase {
+	return &ResponseBase{Status: ResponseSuccess}
+}
+
 type Response[T interface{}] struct {
 	ResponseBase
 	Data T

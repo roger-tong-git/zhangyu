@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/marten-seemann/webtransport-go"
 	"github.com/roger-tong-git/zhangyu/utils"
-	"io"
 	"log"
 	"strings"
 	"sync"
@@ -27,17 +27,13 @@ var WebTransportConnectError = errors.New("到服务端的连接断开")
 
 type InvokeRequest struct {
 	RequestId string
-	FromType  InvokeTerminal
-	FromId    string
-	ToType    InvokeTerminal
-	ToId      string
 	Path      string
 	Header    map[string]string
 	BodyJson  string
 }
 
 func NewInvokeRequest(requestId string, path string) *InvokeRequest {
-	return &InvokeRequest{RequestId: requestId, Path: path}
+	return &InvokeRequest{RequestId: requestId, Path: path, Header: map[string]string{}}
 }
 
 func NewSuccessResponse(r *InvokeRequest, v any) *InvokeResponse {
@@ -73,9 +69,9 @@ func NewInvokeResponse(requestId string, resultCode InvokeResultCode, resultMess
 }
 
 type Invoker struct {
+	connIP        string
 	connId        string
-	reader        io.Reader
-	writer        io.Writer
+	transportConn *WebtransportConn
 	writerLock    sync.Mutex
 	readerLock    sync.Mutex
 	route         *InvokeRoute
@@ -84,12 +80,32 @@ type Invoker struct {
 	utils.Closer
 }
 
+func (s *Invoker) TransportConn() *WebtransportConn {
+	return s.transportConn
+}
+
+func (s *Invoker) ConnId() string {
+	return s.connId
+}
+
+func (s *Invoker) Read(p []byte) (int, error) {
+	return s.transportConn.Read(p)
+}
+
+func (s *Invoker) Write(p []byte) (int, error) {
+	return s.transportConn.Write(p)
+}
+
+func (s *Invoker) ConnIP() string {
+	return s.connIP
+}
+
 func (s *Invoker) readBytes(readLen int) (*[]byte, error) {
 	b := make([]byte, readLen)
 	r := make([]byte, 0)
 	totalRead := 0
 	for {
-		if readSize, err := s.reader.Read(b); err != nil {
+		if readSize, err := s.transportConn.Read(b); err != nil {
 			return nil, err
 		} else {
 			r = append(r, b[:readSize]...)
@@ -106,7 +122,7 @@ func (s *Invoker) writeBytes(b []byte) error {
 	totalWrite := 0
 	writeLen := len(b)
 	for {
-		if l, err := s.writer.Write(b[totalWrite:]); err != nil {
+		if l, err := s.transportConn.Write(b[totalWrite:]); err != nil {
 			return err
 		} else {
 			totalWrite += l
@@ -126,8 +142,8 @@ func (s *Invoker) receiveResponse(resp *InvokeResponse) {
 	}
 }
 
-// readInvoke 从io.reader中读取数据，数据只可能是InvokeRequest/InvokeResponse/error
-func (s *Invoker) readInvoke() (*InvokeRequest, *InvokeResponse, error) {
+// ReadInvoke 从io.reader中读取数据，数据只可能是InvokeRequest/InvokeResponse/error
+func (s *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
 	defer s.readerLock.Unlock()
 	s.readerLock.Lock()
 
@@ -163,12 +179,12 @@ func (s *Invoker) readInvoke() (*InvokeRequest, *InvokeResponse, error) {
 	}
 }
 
-// writeInvoke 写入数据到 io.writer中，写入的数据只可能是 InvokeRequest/InvokeResponse
+// WriteInvoke 写入数据到 io.writer中，写入的数据只可能是 InvokeRequest/InvokeResponse
 // 写入的格式为:
 // 类型-byte InvokeRequest-1 / InvokeResponse-2
 // 数据体字节流长度-Int64
 // 数据体字节流 参数r转化为json字符串后取字节流
-func (s *Invoker) writeInvoke(r any) error {
+func (s *Invoker) WriteInvoke(r any) error {
 	defer s.writerLock.Unlock()
 	s.writerLock.Lock()
 
@@ -203,7 +219,7 @@ func (s *Invoker) writeInvoke(r any) error {
 func (s *Invoker) Invoke(r *InvokeRequest) (*InvokeResponse, error) {
 	respChan := make(chan *InvokeResponse, 1)
 	s.invokeMap[r.RequestId] = respChan
-	if err := s.writeInvoke(r); err != nil {
+	if err := s.WriteInvoke(r); err != nil {
 		s.CtxCancel()
 		return nil, err
 	}
@@ -264,12 +280,12 @@ func (r *InvokeRoute) HasInvoke(connId string) bool {
 	return ok
 }
 
-func (r *InvokeRoute) dispatchInvoke(invoker *Invoker) {
+func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 	for {
 		if !r.HasInvoke(invoker.connId) {
 			break
 		}
-		req, resp, err := invoker.readInvoke()
+		req, resp, err := invoker.ReadInvoke()
 		if err != nil {
 			invoker.CtxCancel()
 			r.RemoveInvoker(invoker.connId)
@@ -286,10 +302,10 @@ func (r *InvokeRoute) dispatchInvoke(invoker *Invoker) {
 						callResp = NewInvokeResponse(req.RequestId, InvokeResult_Error, str)
 					}
 
-					if callErr := invoker.writeInvoke(callResp); callErr != nil {
+					if callErr := invoker.WriteInvoke(callResp); callErr != nil {
 						invoker.CtxCancel()
 						r.RemoveInvoker(invoker.connId)
-						log.Println("writeInvoke Error", callErr)
+						log.Println("WriteInvoke Error", callErr)
 						return
 					}
 				}()
@@ -300,17 +316,22 @@ func (r *InvokeRoute) dispatchInvoke(invoker *Invoker) {
 	}
 }
 
-func (r *InvokeRoute) AddInvoker(connId string, reader io.Reader, writer io.Writer) *Invoker {
+func (r *InvokeRoute) AddInvoker(connId string, session *webtransport.Session, stream webtransport.Stream) *Invoker {
 	defer r.invokerLock.Unlock()
 	r.invokerLock.Lock()
-	invoker := &Invoker{connId: connId, reader: reader, writer: writer, invokeMap: map[string]chan *InvokeResponse{}}
+	invoker := &Invoker{
+		connIP:        session.RemoteAddr().String(),
+		connId:        connId,
+		transportConn: NewWebtransportConn(session, stream),
+		invokeMap:     map[string]chan *InvokeResponse{}}
 	invoker.SetCtx(r.Ctx())
 	invoker.SetOnClose(func() {
+		if invoker.transportConn != nil {
+			_ = invoker.transportConn.Close()
+		}
 		go r.RemoveInvoker(connId)
 	})
 	r.invokes[connId] = invoker
-	go r.dispatchInvoke(invoker)
-
 	return invoker
 }
 

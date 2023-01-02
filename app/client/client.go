@@ -44,8 +44,6 @@ func (c *Client) sayOnline() {
 				continue
 			}
 			req := network.NewInvokeRequest(c.TerminalId, "/client/sayOnline")
-			req.FromId = c.TerminalId
-			req.FromType = network.InvokeTerminal_Client
 			cliInfo := &network.ClientConnInfo{}
 			cliInfo.TerminalId = c.TerminalId
 			cliInfo.ConnectionId = c.connectionId
@@ -59,7 +57,7 @@ func (c *Client) sayOnline() {
 }
 
 // Connect 注册新的客户端
-func (c *Client) Connect() error {
+func (c *Client) Connect() {
 	cliInfo := &network.ClientConnInfo{}
 	cliInfo.TerminalId = c.TerminalId
 	cliInfo.ConnectionId = c.connectionId
@@ -68,15 +66,13 @@ func (c *Client) Connect() error {
 	go c.sayOnline()
 	c.transportCli = network.NewWebSocketClient(c.Ctx(), cliInfo)
 
-	if err := c.transportCli.ConnectTo(c.NodeAddr, func() {
+	c.transportCli.ConnectTo(c.NodeAddr, func() {
 		time.Sleep(time.Second)
 		path := "/client/register"
 		if c.Token != "" || c.TunnelId != "" {
 			path = "/client/login"
 		}
 		req := network.NewInvokeRequest(c.TerminalId, path)
-		req.FromId = cliInfo.TerminalId
-		req.FromType = network.InvokeTerminal_Client
 		req.BodyJson = utils.GetJsonString(cliInfo)
 		resp := c.transportCli.Invoke(req)
 		if resp.ResultCode == network.InvokeResult_Success {
@@ -85,13 +81,21 @@ func (c *Client) Connect() error {
 			c.AuthCode = cliInfo.AuthCode
 			c.Token = cliInfo.Token
 			utils.SaveJsonSetting("client.json", c)
-			log.Println(fmt.Sprintf("客户端ID[%v]注册成功,获得通道ID[%v]", c.TunnelId, c.TerminalId))
+			log.Println(fmt.Sprintf("客户端ID[%v]注册成功", c.TerminalId))
+			log.Println(fmt.Sprintf("客户端通道ID[%v],客户端验证码[%v]", c.TunnelId, c.AuthCode))
+
+			recPath := "/client/transfer/map/list"
+			req.Path = recPath
+			resp = c.transportCli.Invoke(req)
+			if resp.ResultCode == network.InvokeResult_Success {
+				var mapReqs []*network.TransferRequest
+				utils.GetJsonValue(&mapReqs, resp.BodyJson)
+				for _, v := range mapReqs {
+					c.transportCli.AppendTransferMap(v)
+				}
+			}
 		}
-	}); err != nil {
-		log.Println("连接到服务端失败,稍后将重试")
-		return err
-	}
-	return nil
+	})
 }
 
 func (c *Client) IsConnected() bool {
@@ -111,20 +115,21 @@ func NewClient(ctx context.Context) *Client {
 	})
 	c.SetCtx(ctx)
 	c.SetOnClose(c.onClose)
-	go func() {
-		for {
-			select {
-			case <-c.Ctx().Done():
-				return
-			default:
-				if c.IsConnected() {
-					time.Sleep(time.Second)
-					continue
-				} else {
-					_ = c.Connect()
-				}
-			}
-		}
-	}()
+	c.Connect()
+	//go func() {
+	//	for {
+	//		select {
+	//		case <-c.Ctx().Done():
+	//			return
+	//		default:
+	//			if c.IsConnected() {
+	//				time.Sleep(time.Second)
+	//				continue
+	//			} else {
+	//				_ = c.Connect()
+	//			}
+	//		}
+	//	}
+	//}()
 	return c
 }

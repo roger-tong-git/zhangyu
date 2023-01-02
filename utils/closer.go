@@ -34,6 +34,11 @@ func (c *Closer) CtxCancel() {
 	}
 }
 
+func (c *Closer) Close() error {
+	c.CtxCancel()
+	return nil
+}
+
 func (c *Closer) SetCtx(parent context.Context) {
 	if parent != nil {
 		if c.ctx != nil && !c.closed {

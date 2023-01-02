@@ -6,6 +6,7 @@ import (
 	"github.com/roger-tong-git/zhangyu/utils"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 	"log"
 	"strings"
 	"time"
@@ -15,6 +16,8 @@ const (
 	EtcdKey_Node              = "/zhangyu/nodes"
 	EtcdKey_Client_Connection = "/zhangyu/clients/connections"
 	EtcdKey_Client_Record     = "/zhangyu/clients/records"
+	EtcdKey_Client_MapItem    = "/zhangyu/clients/records/%v/transferMaps/[%v]"
+	EtcdKey_HttpDomain_Bind   = "/zhangyu/domain/binds"
 )
 
 type EtcdOp struct {
@@ -73,22 +76,26 @@ func NewEtcdOp(ctx context.Context, etcdUri string) *EtcdOp {
 
 	op.SetCtx(ctx)
 	op.SetOnClose(op.onClose)
-	endPoints := strings.Split(op.EtcdUri, ",")
 	etcdConf := clientv3.Config{
-		Endpoints:   endPoints,
+		Endpoints:   strings.Split(op.EtcdUri, ","),
 		DialTimeout: 5 * time.Second,
+		LogConfig: &zap.Config{
+			Level:       zap.NewAtomicLevelAt(zap.ErrorLevel),
+			Development: false,
+			Sampling: &zap.SamplingConfig{
+				Initial:    100,
+				Thereafter: 100,
+			},
+			Encoding:      "json",
+			EncoderConfig: zap.NewProductionEncoderConfig(),
+			// Use "/dev/null" to discard all
+			OutputPaths:      []string{"stderr"},
+			ErrorOutputPaths: []string{"stderr"},
+		},
 	}
 
 	if etcdCli, err := clientv3.New(etcdConf); err == nil {
 		op.etcdCli = etcdCli
-		//if resp, rErr := etcdCli.Get(op.Ctx(), EtcdKey_Node, clientv3.WithPrefix()); rErr == nil {
-		//	log.Println("==============================")
-		//	for _, v := range resp.Kvs {
-		//		log.Println("key:", string(v.Key), "value:", string(v.Value))
-		//	}
-		//	log.Println("==============================")
-		//}
-
 	} else {
 		log.Fatalln(err)
 	}
@@ -161,6 +168,21 @@ func (s *EtcdOp) GetJsonValue(key string, value any) bool {
 		if resp.Count > 0 {
 			v := resp.Kvs[0].Value
 			utils.GetJsonValue(value, string(v))
+			return true
+		}
+	}
+	return false
+}
+
+func (s *EtcdOp) GetArray(key string, arrayHandler func(s string)) bool {
+	if resp, err := s.etcdCli.Get(s.Ctx(), key, clientv3.WithPrefix()); err == nil {
+		if resp.Count > 0 {
+			for i := int64(0); i < resp.Count; i++ {
+				v := resp.Kvs[i].Value
+				if arrayHandler != nil {
+					arrayHandler(string(v))
+				}
+			}
 			return true
 		}
 	}
