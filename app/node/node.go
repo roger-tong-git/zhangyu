@@ -19,6 +19,7 @@ import (
 	rand2 "math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -35,7 +36,8 @@ type Node struct {
 	etcdOp        *EtcdOp
 	h3Server      *http3.Server
 	clients       *utils.Cache[*ClientSession]
-	transfers     *utils.Cache[*TransferSession]
+	transfers     map[string]*TransferSession
+	transferLock  sync.Mutex
 	httpMux       *mux.Router
 	//quicMux       *echo.Echo
 	//httpMux       *echo.Echo
@@ -50,15 +52,21 @@ func (s *Node) OnClose() {
 }
 
 func (s *Node) getTransfer(connId string) *TransferSession {
-	return s.transfers.Get(connId)
+	defer s.transferLock.Unlock()
+	s.transferLock.Lock()
+	return s.transfers[connId]
 }
 
 func (s *Node) setTransfer(connId string, instance *TransferSession) {
-	s.transfers.Set(connId, instance)
+	defer s.transferLock.Unlock()
+	s.transferLock.Lock()
+	s.transfers[connId] = instance
 }
 
 func (s *Node) deleteTransfer(connId string) {
-	s.transfers.Delete(connId)
+	defer s.transferLock.Unlock()
+	s.transferLock.Lock()
+	delete(s.transfers, connId)
 }
 
 func (s *Node) nodeWatcher(eventType string, key string, value []byte) {
@@ -134,12 +142,7 @@ func NewNode(ctx context.Context) *Node {
 	node.clients = utils.NewCache[*ClientSession](node.Ctx())
 	node.clients.SetExpireHandler(node.onClientExpire)
 	node.clientIdMaps = sync.Map{}
-	node.transfers = utils.NewCache[*TransferSession](node.Ctx())
-	node.transfers.SetExpireHandler(func(key string, value any) {
-		if transfer, ok := value.(*TransferSession); ok {
-			_ = transfer.Close()
-		}
-	})
+	node.transfers = map[string]*TransferSession{}
 
 	utils.ReadJsonSetting("node.json", node, func() {
 		node.TerminalId = uuid.New().String()
@@ -279,55 +282,57 @@ func (s *Node) connectTarget(mapRequest *network.TransferRequest, connId string)
 	return invResp
 }
 
-//func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-//	if r.URL.RequestURI() != network.WebSocket_ServicePath {
-//		host := strings.ToLower(strings.Split(strings.TrimSpace(r.Host), ":")[0])
-//		httpKey := fmt.Sprintf("%v/%v", EtcdKey_HttpDomain_Bind, host)
-//		tq := &network.TransferRequest{}
-//
-//		if s.etcdOp.GetJsonValue(httpKey, tq) {
-//			targetCliConn := &network.ClientConnInfo{}
-//			targetCliKey := fmt.Sprintf("%v/%v", EtcdKey_Client_Connection, tq.TargetTerminalTunnelId)
-//			targetUri, _ := url.Parse(tq.TargetTerminalUri)
-//			if s.etcdOp.GetJsonValue(targetCliKey, targetCliConn) {
-//				httpConnId := fmt.Sprintf("%v|%v", r.RemoteAddr, tq.TargetTerminalTunnelId)
-//				transfer := s.transfers.Get(httpConnId)
-//				if transfer == nil {
-//					transfer = NewTransferSession(s.Ctx(), httpConnId, nil)
-//					s.setTransfer(transfer.TransferId(), transfer)
-//				}
-//				go func() {
-//					_ = s.connectTarget(tq, httpConnId)
-//				}()
-//				<-transfer.TransferChan()
-//				s.transfers.SetExpire(transfer.TransferId(), time.Minute*5)
-//				if targetStream := transfer.TargetStream(); targetStream != nil {
-//					if invoker, ok := targetStream.(*network.Invoker); ok {
-//						outReq := &http.Request{}
-//						*outReq = *r
-//						outReq.Host = targetUri.Host
-//						outReq.URL.Host = targetUri.Host
-//						outReq.URL.Scheme = targetUri.Scheme
-//
-//						if resp, err := s.createRoundTripper(invoker).RoundTrip(outReq); err == nil {
-//							for k, v := range resp.Header {
-//								value := strings.Join(v, ";")
-//								w.Header().Set(k, value)
-//							}
-//							w.WriteHeader(resp.StatusCode)
-//							_ = resp.Write(w)
-//						}
-//					}
-//				}
-//
-//			}
-//		} else {
-//			s.httpMux.ServeHTTP(w, r)
-//		}
-//	} else {
-//		s.httpMux.ServeHTTP(w, r)
-//	}
-//}
+func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RequestURI() != network.WebSocket_ServicePath {
+		host := strings.ToLower(strings.Split(strings.TrimSpace(r.Host), ":")[0])
+		httpKey := fmt.Sprintf("%v/%v", EtcdKey_HttpDomain_Bind, host)
+		tq := &network.TransferRequest{}
+
+		if s.etcdOp.GetJsonValue(httpKey, tq) {
+			go func() {
+				_ = s.connectTarget(tq, "1234567")
+			}()
+			targetCliConn := &network.ClientConnInfo{}
+			targetCliKey := fmt.Sprintf("%v/%v", EtcdKey_Client_Connection, tq.TargetTerminalTunnelId)
+			targetUri, _ := url.Parse(tq.TargetTerminalUri)
+			if s.etcdOp.GetJsonValue(targetCliKey, targetCliConn) {
+				httpConnId := fmt.Sprintf("%v|%v", r.RemoteAddr, tq.TargetTerminalTunnelId)
+				transfer := s.getTransfer(httpConnId)
+				if transfer == nil {
+					transfer = NewTransferSession(s.Ctx(), httpConnId, nil)
+					s.setTransfer(transfer.TransferId(), transfer)
+				}
+				go func() {
+					_ = s.connectTarget(tq, httpConnId)
+				}()
+				<-transfer.TransferChan()
+				if targetStream := transfer.TargetStream(); targetStream != nil {
+					if invoker, ok := targetStream.(*network.Invoker); ok {
+						outReq := &http.Request{}
+						*outReq = *r
+						outReq.Host = targetUri.Host
+						outReq.URL.Host = targetUri.Host
+						outReq.URL.Scheme = targetUri.Scheme
+
+						if resp, err := s.createRoundTripper(invoker).RoundTrip(outReq); err == nil {
+							for k, v := range resp.Header {
+								value := strings.Join(v, ";")
+								w.Header().Set(k, value)
+							}
+							w.WriteHeader(resp.StatusCode)
+							_ = resp.Write(w)
+						}
+					}
+				}
+
+			}
+		} else {
+			s.httpMux.ServeHTTP(w, r)
+		}
+	} else {
+		s.httpMux.ServeHTTP(w, r)
+	}
+}
 
 func (s *Node) initQuic() {
 	addr := fmt.Sprintf("0.0.0.0:%v", s.ServerPort)
@@ -339,20 +344,20 @@ func (s *Node) initQuic() {
 	// 针对Http服务，注册handler
 	// 这里分开quic跟Http，是因为webtransport-go中有bug,http调用过程未完成时，不接受新的session
 
-	//s.initHttpHandlers(s.httpMux)
-	//go func() {
-	//	//tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
-	//	//if err != nil {
-	//	//	log.Fatalln(err)
-	//	//	return
-	//	//}
-	//
-	//	server := &http.Server{
-	//		Addr:    "0.0.0.0:19999",
-	//		Handler: s,
-	//	}
-	//	_ = server.ListenAndServe()
-	//}()
+	// s.initHttpHandlers(s.httpMux)
+	go func() {
+		tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+		if err != nil {
+			log.Fatalln(err)
+			return
+		}
+
+		server := &http.Server{
+			Addr:    tcpAddr.String(),
+			Handler: s,
+		}
+		_ = server.ListenAndServe()
+	}()
 
 	s.generateTLSConfig()
 	certs := make([]tls.Certificate, 1)
@@ -380,6 +385,7 @@ func (s *Node) initQuic() {
 	s.h3Server = h3
 	s.initInvokeHandles()
 	// 针对指定的路径，升级成WebTransport
+
 	s.httpMux.HandleFunc(network.WebSocket_ServicePath, s.upgradeWebtransportConn)
 
 	// 开启quic协议
@@ -396,29 +402,32 @@ func (s *Node) upgradeWebtransportConn(w http.ResponseWriter, r *http.Request) {
 	if session, err := s.transportServer.Upgrade(w, r); err != nil {
 		log.Println(err)
 	} else {
-		if stream, err := session.AcceptStream(s.Ctx()); err != nil {
-			log.Println(err)
-			return
-		} else {
-			invoker := s.invokeRoute.AddInvoker(connectionId, session, stream)
-			if isCmdTrans {
-				go s.invokeRoute.DispatchInvoke(invoker)
+		go func() {
+			if stream, err := session.AcceptStream(s.Ctx()); err != nil {
+				log.Println(err)
+				return
+			} else {
+				invoker := s.invokeRoute.AddInvoker(connectionId, session, stream)
+				if isCmdTrans {
+					go s.invokeRoute.DispatchInvoke(invoker)
+				}
+				if isInstanceFrom {
+					go s.transfer(invoker)
+				}
+				if isInstanceTarget {
+					go func() {
+						transfer := s.getTransfer(invoker.ConnId())
+						if transfer == nil {
+							invoker.CtxCancel()
+						} else {
+							transfer.SetTargetStream(invoker)
+							transfer.TransferChan() <- true
+						}
+					}()
+				}
 			}
-			if isInstanceFrom {
-				go s.transfer(invoker)
-			}
-			if isInstanceTarget {
-				go func() {
-					transfer := s.getTransfer(invoker.ConnId())
-					if transfer == nil {
-						invoker.CtxCancel()
-					} else {
-						transfer.SetTargetStream(invoker)
-						transfer.TransferChan() <- true
-					}
-				}()
-			}
-		}
+		}()
+
 	}
 }
 
@@ -632,6 +641,10 @@ func (s *Node) getClientTransferMapList(invoker *network.Invoker, request *netwo
 
 	return network.NewErrorResponse(request, "未知错误")
 }
+
+//func (s *Node) rootHandler(w http.ResponseWriter, r *http.Request) {
+//	s.httpMux.ServeHTTP(w, r)
+//}
 
 //func (s *Node) httpTransport(next echo.HandlerFunc) echo.HandlerFunc {
 //	return func(c echo.Context) error {
