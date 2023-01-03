@@ -7,7 +7,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/marten-seemann/webtransport-go"
-	"github.com/roger-tong-git/zhangyu/app"
 	"github.com/roger-tong-git/zhangyu/utils"
 	"log"
 	"net"
@@ -79,6 +78,28 @@ func (w *TransportClient) dial(addr string, connId string, connType string, conn
 	}
 }
 
+func (w *TransportClient) sayOnline() {
+	for {
+		select {
+		case <-w.Ctx().Done():
+			return
+		case <-time.After(time.Second * 5):
+			if !w.Connected() {
+				continue
+			}
+			req := NewInvokeRequest(w.clientInfo.TerminalId, InvokePath_Client_SayOnline)
+			cliInfo := &ClientConnInfo{}
+			cliInfo.TerminalId = w.clientInfo.TerminalId
+			cliInfo.ConnectionId = w.clientInfo.ConnectionId
+			cliInfo.TunnelId = w.clientInfo.TunnelId
+			cliInfo.Token = w.clientInfo.Token
+			cliInfo.Type = w.clientInfo.Type
+			req.BodyJson = utils.GetJsonString(cliInfo)
+			_ = w.Invoke(req)
+		}
+	}
+}
+
 func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 	_ = w.dial(addr, w.clientInfo.ConnectionId, Connection_Command, func(invoker *Invoker) {
 		w.invokeRoute.SetDefaultInvoker(invoker)
@@ -92,6 +113,7 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 		if w.keepaliveRun {
 			return
 		}
+		go w.sayOnline()
 		w.keepaliveRun = true
 		for {
 			select {
@@ -153,9 +175,9 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 }
 
 func (w *TransportClient) initEvents() {
-	w.invokeRoute.AddHandler(app.InvokePath_Client_Kick, w.onKick)            //当前用户被踢下线
-	w.invokeRoute.AddHandler(app.InvokePath_Transfer_Add, w.onTransferMapAdd) //收到添加转发通道的命令
-	w.invokeRoute.AddHandler(app.InvokePath_Transfer_Start, w.onTransferMapStart)
+	w.invokeRoute.AddHandler(InvokePath_Client_Kick, w.onKick)            //当前用户被踢下线
+	w.invokeRoute.AddHandler(InvokePath_Transfer_Add, w.onTransferMapAdd) //收到添加转发通道的命令
+	w.invokeRoute.AddHandler(InvokePath_Transfer_Start, w.onTransferMapStart)
 }
 
 func (w *TransportClient) onKick(invoker *Invoker, request *InvokeRequest) *InvokeResponse {
@@ -297,7 +319,7 @@ func (w *TransportClient) onTransferMapStart(_ *Invoker, r *InvokeRequest) *Invo
 	return resp
 }
 
-func NewWebSocketClient(ctx context.Context, clientInfo *ClientConnInfo) *TransportClient {
+func NewTransferClient(ctx context.Context, clientInfo *ClientConnInfo) *TransportClient {
 	w := &TransportClient{clientInfo: clientInfo}
 	w.SetCtx(ctx)
 	w.invokeRoute = NewInvokeRoute(w.Ctx())

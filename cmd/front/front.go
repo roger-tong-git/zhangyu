@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"github.com/roger-tong-git/zhangyu/app/node"
+	"github.com/roger-tong-git/zhangyu/app/front"
 	"log"
 	"os"
 	"os/signal"
@@ -11,11 +11,11 @@ import (
 
 func main() {
 	ctx := context.Background()
-	sNode := node.NewNode(ctx)
-	defer sNode.Close()
+	sFront := front.NewFront(ctx)
+	defer sFront.Close()
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
-	log.Println("node服务收到停止指令，服务将终止")
+	log.Println("front服务收到停止指令，服务将终止")
 }

@@ -14,6 +14,7 @@ type TerminalType int
 type ConnectionType string
 
 const (
+	TerminalType_Front         = TerminalType(0)
 	TerminalType_Node          = TerminalType(1)
 	TerminalType_Client        = TerminalType(2)
 	HeadKey_TerminalId         = "Zhangyu-TerminalId"

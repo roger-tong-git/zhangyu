@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/google/uuid"
-	"github.com/roger-tong-git/zhangyu/app"
 	"github.com/roger-tong-git/zhangyu/network"
 	"github.com/roger-tong-git/zhangyu/utils"
 	"log"
@@ -33,31 +32,6 @@ func (c *Client) Close() {
 	c.CtxCancel()
 }
 
-func (c *Client) sayOnline() {
-	for {
-		select {
-		case <-c.Ctx().Done():
-			return
-		case <-time.After(time.Second * 5):
-			if c.transportCli == nil {
-				continue
-			}
-			if !c.transportCli.Connected() {
-				continue
-			}
-			req := network.NewInvokeRequest(c.TerminalId, "/client/sayOnline")
-			cliInfo := &network.ClientConnInfo{}
-			cliInfo.TerminalId = c.TerminalId
-			cliInfo.ConnectionId = c.connectionId
-			cliInfo.TunnelId = c.TunnelId
-			cliInfo.Token = c.Token
-			cliInfo.Type = network.TerminalType_Client
-			req.BodyJson = utils.GetJsonString(cliInfo)
-			_ = c.transportCli.Invoke(req)
-		}
-	}
-}
-
 // Connect 注册新的客户端
 func (c *Client) Connect() {
 	cliInfo := &network.ClientConnInfo{}
@@ -65,14 +39,13 @@ func (c *Client) Connect() {
 	cliInfo.ConnectionId = c.connectionId
 	cliInfo.Token = c.Token
 	cliInfo.Type = network.TerminalType_Client
-	go c.sayOnline()
-	c.transportCli = network.NewWebSocketClient(c.Ctx(), cliInfo)
+	c.transportCli = network.NewTransferClient(c.Ctx(), cliInfo)
 
 	c.transportCli.ConnectTo(c.NodeAddr, func() {
 		time.Sleep(time.Second)
-		path := app.InvokePath_Client_Register
+		path := network.InvokePath_Client_Register
 		if c.Token != "" || c.TunnelId != "" {
-			path = app.InvokePath_Client_Login
+			path = network.InvokePath_Client_Login
 		}
 		req := network.NewInvokeRequest(c.TerminalId, path)
 		req.BodyJson = utils.GetJsonString(cliInfo)
@@ -87,7 +60,7 @@ func (c *Client) Connect() {
 			log.Println(fmt.Sprintf("客户端通道ID[%v],客户端验证码[%v]", c.TunnelId, c.AuthCode))
 
 			if !c.addListenPorted {
-				recPath := app.InvokePath_Client_Transfer_List
+				recPath := network.InvokePath_Client_Transfer_List
 				req.Path = recPath
 				resp = c.transportCli.Invoke(req)
 				if resp.ResultCode == network.InvokeResult_Success {

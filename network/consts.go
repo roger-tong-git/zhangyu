@@ -1,4 +1,4 @@
-package app
+package network
 
 const (
 	InvokePath_Transfer_Start       = "/_zhangyu/transfer/start"
