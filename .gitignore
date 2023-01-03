@@ -1,7 +1,8 @@
-
 *.exe
 .idea/inspectionProfiles/Project_Default.xml
 client.json
+cmd/node/node
+cmd/front/front
 cmd/node/node.json
 cmd/node/node.key
 cmd/node/node.pem
