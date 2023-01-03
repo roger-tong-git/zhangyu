@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/google/uuid"
+	"github.com/roger-tong-git/zhangyu/app"
 	"github.com/roger-tong-git/zhangyu/network"
 	"github.com/roger-tong-git/zhangyu/utils"
 	"log"
@@ -20,6 +21,7 @@ type Client struct {
 	connectionId     string
 	transportCli     *network.TransportClient
 	utils.Closer     `json:"-"`
+	addListenPorted  bool
 	sayOnlineRunning bool
 }
 
@@ -68,9 +70,9 @@ func (c *Client) Connect() {
 
 	c.transportCli.ConnectTo(c.NodeAddr, func() {
 		time.Sleep(time.Second)
-		path := "/client/register"
+		path := app.InvokePath_Client_Register
 		if c.Token != "" || c.TunnelId != "" {
-			path = "/client/login"
+			path = app.InvokePath_Client_Login
 		}
 		req := network.NewInvokeRequest(c.TerminalId, path)
 		req.BodyJson = utils.GetJsonString(cliInfo)
@@ -84,15 +86,18 @@ func (c *Client) Connect() {
 			log.Println(fmt.Sprintf("客户端ID[%v]注册成功", c.TerminalId))
 			log.Println(fmt.Sprintf("客户端通道ID[%v],客户端验证码[%v]", c.TunnelId, c.AuthCode))
 
-			recPath := "/client/transfer/map/list"
-			req.Path = recPath
-			resp = c.transportCli.Invoke(req)
-			if resp.ResultCode == network.InvokeResult_Success {
-				var mapReqs []*network.TransferRequest
-				utils.GetJsonValue(&mapReqs, resp.BodyJson)
-				for _, v := range mapReqs {
-					c.transportCli.AppendTransferMap(v)
+			if !c.addListenPorted {
+				recPath := app.InvokePath_Client_Transfer_List
+				req.Path = recPath
+				resp = c.transportCli.Invoke(req)
+				if resp.ResultCode == network.InvokeResult_Success {
+					var mapReqs []*network.TransferRequest
+					utils.GetJsonValue(&mapReqs, resp.BodyJson)
+					for _, v := range mapReqs {
+						c.transportCli.AppendTransferMap(v)
+					}
 				}
+				c.addListenPorted = true
 			}
 		}
 	})
@@ -116,20 +121,5 @@ func NewClient(ctx context.Context) *Client {
 	c.SetCtx(ctx)
 	c.SetOnClose(c.onClose)
 	c.Connect()
-	//go func() {
-	//	for {
-	//		select {
-	//		case <-c.Ctx().Done():
-	//			return
-	//		default:
-	//			if c.IsConnected() {
-	//				time.Sleep(time.Second)
-	//				continue
-	//			} else {
-	//				_ = c.Connect()
-	//			}
-	//		}
-	//	}
-	//}()
 	return c
 }

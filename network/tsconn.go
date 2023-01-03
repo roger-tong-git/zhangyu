@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/marten-seemann/webtransport-go"
+	"github.com/roger-tong-git/zhangyu/app"
 	"github.com/roger-tong-git/zhangyu/utils"
 	"log"
 	"net"
@@ -42,7 +43,7 @@ func (w *TransportClient) DefaultInvoker() *Invoker {
 
 func (w *TransportClient) Invoke(r *InvokeRequest) *InvokeResponse {
 	re, err := w.invokeRoute.defaultInvoker.Invoke(r)
-	if err != nil && err == WebTransportConnectError {
+	if err != nil {
 		w.connected = false
 		return NewInvokeResponse(r.RequestId, InvokeResult_Error, err.Error())
 	}
@@ -152,9 +153,9 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 }
 
 func (w *TransportClient) initEvents() {
-	w.invokeRoute.AddHandler("/client/kick", w.onKick)                         //当前用户被踢下线
-	w.invokeRoute.AddHandler("/_zhangyu/transfer/map/add", w.onTransferMapAdd) //收到添加转发通道的命令
-	w.invokeRoute.AddHandler("/_zhangyu/transfer/map/start", w.onTransferMapStart)
+	w.invokeRoute.AddHandler(app.InvokePath_Client_Kick, w.onKick)            //当前用户被踢下线
+	w.invokeRoute.AddHandler(app.InvokePath_Transfer_Add, w.onTransferMapAdd) //收到添加转发通道的命令
+	w.invokeRoute.AddHandler(app.InvokePath_Transfer_Start, w.onTransferMapStart)
 }
 
 func (w *TransportClient) onKick(invoker *Invoker, request *InvokeRequest) *InvokeResponse {
@@ -275,10 +276,8 @@ func (w *TransportClient) AppendTransferStart(connId string, tq *TransferRequest
 
 	return w.dial(w.lastAddr, connId, Connection_Instance_Target, func(invoker *Invoker) {
 		go func() {
-			if sourceUrl.Scheme == "tcp" {
-				transferStream := NewTransferStream(connId, invoker, conn)
-				transferStream.Transfer()
-			}
+			transferStream := NewTransferStream(connId, invoker, conn)
+			transferStream.Transfer()
 		}()
 	})
 }

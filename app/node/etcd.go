@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	EtcdKey_Node              = "/zhangyu/nodes"
-	EtcdKey_Client_Connection = "/zhangyu/clients/connections"
-	EtcdKey_Client_Record     = "/zhangyu/clients/records"
-	EtcdKey_Client_MapItem    = "/zhangyu/clients/records/%v/transferMaps/[%v]"
-	EtcdKey_HttpDomain_Bind   = "/zhangyu/domain/binds"
+	EtcdKey_Node                  = "/zhangyu/nodes"
+	EtcdKey_Client_Connection     = "/zhangyu/clients/connections"
+	EtcdKey_Client_Record         = "/zhangyu/clients/records"
+	EtcdKey_Client_MapItem        = "/zhangyu/clients/records/%v/transferMaps/[%v]"
+	EtcdKey_Client_TransferPrefix = "/zhangyu/clients/records/%v/transferMaps/"
+	EtcdKey_HttpDomain_Bind       = "/zhangyu/domain/binds"
 )
 
 type EtcdOp struct {
