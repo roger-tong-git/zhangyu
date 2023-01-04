@@ -80,6 +80,14 @@ type Invoker struct {
 	utils.Closer
 }
 
+func (s *Invoker) WriterLock() sync.Mutex {
+	return s.writerLock
+}
+
+func (s *Invoker) ReaderLock() sync.Mutex {
+	return s.readerLock
+}
+
 func (s *Invoker) TransportConn() *WebtransportConn {
 	return s.transportConn
 }
@@ -134,6 +142,24 @@ func (s *Invoker) writeBytes(b []byte) error {
 	return nil
 }
 
+func (s *Invoker) setInvokeMap(key string, v chan *InvokeResponse) {
+	defer s.invokeMapLock.Unlock()
+	s.invokeMapLock.Lock()
+	s.invokeMap[key] = v
+}
+
+func (s *Invoker) getInvokeMap(key string) chan *InvokeResponse {
+	defer s.invokeMapLock.Unlock()
+	s.invokeMapLock.Lock()
+	return s.invokeMap[key]
+}
+
+func (s *Invoker) deleteInvokeMap(key string) {
+	defer s.invokeMapLock.Unlock()
+	s.invokeMapLock.Lock()
+	delete(s.invokeMap, key)
+}
+
 func (s *Invoker) receiveResponse(resp *InvokeResponse) {
 	defer s.invokeMapLock.Unlock()
 	s.invokeMapLock.Lock()
@@ -144,39 +170,7 @@ func (s *Invoker) receiveResponse(resp *InvokeResponse) {
 
 // ReadInvoke 从io.reader中读取数据，数据只可能是InvokeRequest/InvokeResponse/error
 func (s *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
-	defer s.readerLock.Unlock()
-	s.readerLock.Lock()
-
-	readTypeBytes, err := s.readBytes(1)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	readType := (*readTypeBytes)[0]
-	if readType != byte(1) && readType != byte(2) {
-		return nil, nil, errors.New(fmt.Sprintf("读取到的invoke类型无效：%v", readType))
-	}
-
-	readSizeBytes, err := s.readBytes(8)
-	if err != nil {
-		return nil, nil, err
-	}
-	var readBytes *[]byte
-	readSize := utils.ByteArrayToInt(*readSizeBytes)
-	if readBytes, err = s.readBytes(int(readSize)); err != nil {
-		return nil, nil, err
-	} else {
-		jsonValue := string(*readBytes)
-		if readType == byte(1) {
-			req := &InvokeRequest{}
-			utils.GetJsonValue(req, jsonValue)
-			return req, nil, nil
-		} else {
-			resp := &InvokeResponse{}
-			utils.GetJsonValue(resp, jsonValue)
-			return nil, resp, nil
-		}
-	}
+	return ReadInvoke(s.readerLock, s)
 }
 
 // WriteInvoke 写入数据到 io.writer中，写入的数据只可能是 InvokeRequest/InvokeResponse
@@ -185,40 +179,12 @@ func (s *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
 // 数据体字节流长度-Int64
 // 数据体字节流 参数r转化为json字符串后取字节流
 func (s *Invoker) WriteInvoke(r any) error {
-	defer s.writerLock.Unlock()
-	s.writerLock.Lock()
-
-	invokeTypeByte := make([]byte, 1)
-	if _, ok := r.(*InvokeRequest); ok {
-		invokeTypeByte[0] = 1
-	} else if _, ok = r.(*InvokeResponse); ok {
-		invokeTypeByte[0] = 2
-	} else {
-		return errors.New("写入的值必须是* InvokeRequest/InvokeResponse 类型")
-	}
-
-	err := s.writeBytes(invokeTypeByte)
-	if err != nil {
-		return err
-	}
-
-	jsonValue := []byte(utils.GetJsonString(r))
-	writeLen := uint32(len(jsonValue))
-	writeLenBytes := utils.IntToByteArray(int64(writeLen))
-	err = s.writeBytes(writeLenBytes)
-	if err != nil {
-		return err
-	}
-	err = s.writeBytes(jsonValue)
-	if err != nil {
-		return err
-	}
-	return nil
+	return WriteInvoke(s.writerLock, s, r)
 }
 
 func (s *Invoker) Invoke(r *InvokeRequest) (*InvokeResponse, error) {
 	respChan := make(chan *InvokeResponse, 1)
-	s.invokeMap[r.RequestId] = respChan
+	s.setInvokeMap(r.RequestId, respChan)
 	if err := s.WriteInvoke(r); err != nil {
 		s.CtxCancel()
 		return nil, err
@@ -227,7 +193,7 @@ func (s *Invoker) Invoke(r *InvokeRequest) (*InvokeResponse, error) {
 	case <-s.Ctx().Done():
 		return nil, WebTransportConnectError
 	case re := <-respChan:
-		delete(s.invokeMap, r.RequestId)
+		s.deleteInvokeMap(r.RequestId)
 		return re, nil
 	}
 }

@@ -12,16 +12,37 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 type TransportClient struct {
 	clientInfo   *ClientConnInfo
 	invokeRoute  *InvokeRoute
+	transfers    map[string]*TransferSession
+	transferLock sync.Mutex
 	connected    bool
 	keepaliveRun bool
 	lastAddr     string
 	utils.Closer
+}
+
+func (w *TransportClient) getTransfer(key string) *TransferSession {
+	defer w.transferLock.Unlock()
+	w.transferLock.Lock()
+	return w.transfers[key]
+}
+
+func (w *TransportClient) deleteTransfer(key string) {
+	defer w.transferLock.Unlock()
+	w.transferLock.Lock()
+	delete(w.transfers, key)
+}
+
+func (w *TransportClient) setTransfer(key string, value *TransferSession) {
+	defer w.transferLock.Unlock()
+	w.transferLock.Lock()
+	w.transfers[key] = value
 }
 
 func (w *TransportClient) Connected() bool {
@@ -49,13 +70,17 @@ func (w *TransportClient) Invoke(r *InvokeRequest) *InvokeResponse {
 	return re
 }
 
-func (w *TransportClient) dial(addr string, connId string, connType string, connectedHandler func(*Invoker)) error {
-	var err error
+func (w *TransportClient) Dial(addr string, connId string, connType string, connectedHandler func(*Invoker)) error {
 	header := http.Header{}
 	header.Set(HeadKey_TerminalId, w.clientInfo.TerminalId)
+	header.Set(HeadKey_TunnelId, w.clientInfo.TunnelId)
 	header.Set(HeadKey_ConnectionId, connId)
 	header.Set(HeadKey_ConnectionType, connType)
+	return w.DialWithHeader(addr, connId, header, connectedHandler)
+}
 
+func (w *TransportClient) DialWithHeader(addr string, connId string, header http.Header, connectedHandler func(*Invoker)) error {
+	var err error
 	var d webtransport.Dialer
 	var session *webtransport.Session
 	d.RoundTripper = &http3.RoundTripper{}
@@ -101,7 +126,7 @@ func (w *TransportClient) sayOnline() {
 }
 
 func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
-	_ = w.dial(addr, w.clientInfo.ConnectionId, Connection_Command, func(invoker *Invoker) {
+	_ = w.Dial(addr, w.clientInfo.ConnectionId, Connection_Command, func(invoker *Invoker) {
 		w.invokeRoute.SetDefaultInvoker(invoker)
 		go w.invokeRoute.DispatchInvoke(invoker)
 		if connectedHandler != nil {
@@ -175,9 +200,10 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 }
 
 func (w *TransportClient) initEvents() {
-	w.invokeRoute.AddHandler(InvokePath_Client_Kick, w.onKick)            //当前用户被踢下线
-	w.invokeRoute.AddHandler(InvokePath_Transfer_Add, w.onTransferMapAdd) //收到添加转发通道的命令
-	w.invokeRoute.AddHandler(InvokePath_Transfer_Start, w.onTransferMapStart)
+	w.invokeRoute.AddHandler(InvokePath_Client_Kick, w.onKick)               //当前用户被踢下线
+	w.invokeRoute.AddHandler(InvokePath_Transfer_Listen, w.onTransferListen) //收到添加转发通道的命令
+	w.invokeRoute.AddHandler(InvokePath_Transfer_Dial, w.onTransferConnTarget)
+	w.invokeRoute.AddHandler(InvokePath_Transfer_Go, w.onTransferGo)
 }
 
 func (w *TransportClient) onKick(invoker *Invoker, request *InvokeRequest) *InvokeResponse {
@@ -185,19 +211,18 @@ func (w *TransportClient) onKick(invoker *Invoker, request *InvokeRequest) *Invo
 	return NewSuccessResponse(request, "")
 }
 
-func (w *TransportClient) onTransferMapAdd(invoker *Invoker, r *InvokeRequest) *InvokeResponse {
-	transferMapReq := &TransferRequest{}
-	utils.GetJsonValue(transferMapReq, r.BodyJson)
-	if err := w.AppendTransferMap(transferMapReq); err != nil {
+func (w *TransportClient) onTransferListen(invoker *Invoker, r *InvokeRequest) *InvokeResponse {
+	transferReq := &TransferRequest{}
+	utils.GetJsonValue(transferReq, r.BodyJson)
+	if err := w.AppendTransferListen(transferReq); err != nil {
 		return NewErrorResponse(r, fmt.Sprintf("监听端返回错误:%v", err.Error()))
 	}
 	return NewSuccessResponse(r, nil)
 }
 
-// AppendTransferMap 开启监听端口，把收到的连接传送到服务端
-func (w *TransportClient) AppendTransferMap(tq *TransferRequest) error {
+// AppendTransferListen 开启监听端口，把收到的连接传送到服务端
+func (w *TransportClient) AppendTransferListen(tq *TransferRequest) error {
 	listenUrl := tq.GetListenUrl()
-	connId := uuid.New().String()
 	switch listenUrl.Scheme {
 	case "tcp":
 		//打开监听端口
@@ -222,11 +247,15 @@ func (w *TransportClient) AppendTransferMap(tq *TransferRequest) error {
 						continue
 					}
 
+					connId := uuid.New().String()
 					// 将接收连接的处理过程放入协程
 					go func() {
-						w.dial(w.lastAddr, connId, Connection_Instance_From, func(invoker *Invoker) {
+						w.Dial(w.lastAddr, connId, Connection_Instance_From, func(invoker *Invoker) {
 							invReq := NewInvokeRequest(uuid.New().String(), "")
 							invReq.BodyJson = utils.GetJsonString(tq)
+							invReq.Header[HeadKey_ConnectionId] = connId
+							invReq.Header[HeadKey_TunnelId] = w.clientInfo.TunnelId
+							invReq.Header[HeadKey_TerminalId] = w.clientInfo.TerminalId
 							reqErr := invoker.WriteInvoke(invReq)
 
 							if reqErr != nil {
@@ -235,28 +264,20 @@ func (w *TransportClient) AppendTransferMap(tq *TransferRequest) error {
 								return
 							}
 
-							_, resp, respErr := invoker.ReadInvoke()
-							if respErr != nil {
-								log.Println(respErr)
-								invoker.CtxCancel()
-								return
-							}
+							transferStream := NewTransferSession(connId, invoker)
+							transferStream.SetTargetStream(conn)
+							w.setTransfer(connId, transferStream)
 
-							if resp.ResultCode == InvokeResult_Error {
-								log.Println(resp.ResultMessage)
-								invoker.CtxCancel()
-								return
-							} else {
-								log.Println(resp.ResultMessage)
-							}
-
-							transferStream := &TransferStream{
-								transferId:   connId,
-								sourceStream: invoker,
-								targetStream: conn,
-							}
-
-							transferStream.Transfer()
+							go func() {
+								select {
+								case <-transferStream.Ctx().Done():
+									w.deleteTransfer(connId)
+									return
+								default:
+									transferStream.Transfer()
+									w.deleteTransfer(connId)
+								}
+							}()
 						})
 					}()
 				}
@@ -266,7 +287,7 @@ func (w *TransportClient) AppendTransferMap(tq *TransferRequest) error {
 	return nil
 }
 
-func (w *TransportClient) AppendTransferStart(connId string, tq *TransferRequest) error {
+func (w *TransportClient) connectTarget(connId string, tq *TransferRequest) error {
 	sourceUrl := tq.GetTargetUrl()
 	host := strings.ToLower(strings.TrimSpace(sourceUrl.Host))
 	port := ""
@@ -296,27 +317,36 @@ func (w *TransportClient) AppendTransferStart(connId string, tq *TransferRequest
 		return listenErr
 	}
 
-	return w.dial(w.lastAddr, connId, Connection_Instance_Target, func(invoker *Invoker) {
-		go func() {
-			transferStream := NewTransferStream(connId, invoker, conn)
-			transferStream.Transfer()
-		}()
+	return w.Dial(w.lastAddr, connId, Connection_Instance_Target, func(invoker *Invoker) {
+		transferStream := NewTransferStream(connId, invoker, conn)
+		transferStream.Transfer()
 	})
 }
 
-func (w *TransportClient) onTransferMapStart(_ *Invoker, r *InvokeRequest) *InvokeResponse {
+func (w *TransportClient) onTransferConnTarget(_ *Invoker, r *InvokeRequest) *InvokeResponse {
 	transferMapReq := &TransferRequest{}
 	utils.GetJsonValue(transferMapReq, r.BodyJson)
-	connId := r.Header["ConnectionId"]
-	if err := w.AppendTransferStart(connId, transferMapReq); err != nil {
+	connId := r.Header[HeadKey_ConnectionId]
+	if err := w.connectTarget(connId, transferMapReq); err != nil {
 		return NewErrorResponse(r, fmt.Sprintf("被控通道[%v]连接到目标服务[%v]失败:%v",
 			transferMapReq.TargetTerminalTunnelId, transferMapReq.TargetTerminalUri, err.Error()))
 	}
 	s := fmt.Sprintf("被控通道[%v]已成功连接到目标服务[%v]",
 		transferMapReq.TargetTerminalTunnelId, transferMapReq.TargetTerminalUri)
+	log.Println(s)
 	resp := NewSuccessResponse(r, nil)
 	resp.ResultMessage = s
 	return resp
+}
+
+func (w *TransportClient) onTransferGo(invoker *Invoker, r *InvokeRequest) *InvokeResponse {
+	connId := r.Header[HeadKey_ConnectionId]
+	transfer := w.getTransfer(connId)
+	if transfer == nil {
+		return NewErrorResponse(r, fmt.Sprintf("找不到ConnId[%v]", connId))
+	}
+	transfer.TransferChan() <- true
+	return NewSuccessResponse(r, nil)
 }
 
 func NewTransferClient(ctx context.Context, clientInfo *ClientConnInfo) *TransportClient {
@@ -324,5 +354,6 @@ func NewTransferClient(ctx context.Context, clientInfo *ClientConnInfo) *Transpo
 	w.SetCtx(ctx)
 	w.invokeRoute = NewInvokeRoute(w.Ctx())
 	w.initEvents()
+	w.transfers = make(map[string]*TransferSession)
 	return w
 }

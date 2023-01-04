@@ -67,7 +67,7 @@ func (c *Client) Connect() {
 					var mapReqs []*network.TransferRequest
 					utils.GetJsonValue(&mapReqs, resp.BodyJson)
 					for _, v := range mapReqs {
-						c.transportCli.AppendTransferMap(v)
+						c.transportCli.AppendTransferListen(v)
 					}
 				}
 				c.addListenPorted = true

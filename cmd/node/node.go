@@ -10,6 +10,7 @@ import (
 )
 
 func main() {
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
 	ctx := context.Background()
 	sNode := node.NewNode(ctx)
 	defer sNode.Close()
