@@ -193,11 +193,9 @@ func (s *Node) initEtcd() {
 func (s *Node) initInvokeHandles() {
 	s.invokeRoute.AddRpcHandler(network.InvokePath_Client_Register, s.invokeClientRegister)
 	s.invokeRoute.AddRpcHandler(network.InvokePath_Client_Login, s.invokeClientLogin)
-	//	s.invokeRoute.AddRpcHandler(network.InvokePath_Client_Heartbeat, s.invokeClientHeartbeat)
 	s.invokeRoute.AddRpcHandler(network.InvokePath_Client_Transfer_List, s.invokeClientTransferList)
 	s.invokeRoute.AddUniHandler(network.InvokePath_Client_Heartbeat, s.invokeHeartbeat)
-
-	//	s.invokeRoute.AddRpcHandler(network.InvokePath_Domain_Info, s.getDomainInfo)
+	s.invokeRoute.AddUniHandler(network.InvokePath_Transfer_Disconnect, s.invokeDisconnect)
 }
 
 func (s *Node) initHttpHandlers(e *echo.Echo) {
@@ -263,7 +261,8 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							w.Header().Set(k, value)
 						}
 						w.WriteHeader(resp.StatusCode)
-						_, _ = io.Copy(w, resp.Body)
+						bytes, _ := io.ReadAll(resp.Body)
+						_ = utils.WriteBytes(w, bytes)
 						return
 					}
 				}
@@ -339,6 +338,8 @@ func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 	isCmdTrans := r.Header.Get(network.HeadKey_ConnectionType) == network.Connection_Command
 	isTransferListen := r.Header.Get(network.HeadKey_ConnectionType) == network.Connection_Instance_From
 	isTransferTarget := r.Header.Get(network.HeadKey_ConnectionType) == network.Connection_Instance_Target
+
+	//session.AcceptSession()
 	if session, err := s.transportServer.Upgrade(w, r); err != nil {
 		log.Println(err)
 	} else {
@@ -616,7 +617,6 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 		}()
 	}
 
-	var resp *network.InvokeResponse
 	var err error
 	if targetCli == nil {
 		log.Println("Target通道不在当前节点")
@@ -624,7 +624,7 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 	} else {
 		// 通知目标端，建立流量通道到服务器
 		req.Path = network.InvokePath_Transfer_Dial
-		resp, err = targetCli.ClientInvoker.Invoke(req)
+		err = targetCli.ClientInvoker.WriteInvoke(req)
 
 		if err != nil {
 			log.Println(err)
@@ -636,32 +636,13 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 		}
 	}
 
-	// 目标端建立连接有可能会报错
-	if resp.ResultCode != network.InvokeResult_Success {
-		log.Println(resp.ResultMessage)
-		go func() {
-			_ = transfer.Close()
-			s.deleteTransfer(connId)
-		}()
-		return
-	}
-
-	if targetCli != nil {
+	if listenCli != nil {
 		go func() {
 			// 通知监听道，开始接入流量
 			req.Path = network.InvokePath_Transfer_Go
-			resp, err = targetCli.ClientInvoker.Invoke(req)
+			err = targetCli.ClientInvoker.WriteInvoke(req)
 			if err != nil {
 				log.Println(err)
-				go func() {
-					_ = transfer.Close()
-					s.deleteTransfer(connId)
-				}()
-				return
-			}
-
-			if resp.ResultCode != network.InvokeResult_Success {
-				log.Println(resp.ResultMessage)
 				go func() {
 					_ = transfer.Close()
 					s.deleteTransfer(connId)
@@ -673,5 +654,16 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 }
 
 func (s *Node) invokeHeartbeat(invoker *network.Invoker, request *network.InvokeRequest) {
+	log.Println("ConnId[", invoker.ConnId(), "] Heartbeat")
 	s.clients.SetExpire(invoker.ConnId(), time.Second*15)
+}
+
+func (s *Node) invokeDisconnect(invoker *network.Invoker, request *network.InvokeRequest) {
+	log.Println("Transfer disconn:", request.RequestId)
+
+	transfer := s.getTransfer(request.RequestId)
+	if transfer != nil {
+		_ = transfer.Close()
+		s.deleteTransfer(request.RequestId)
+	}
 }

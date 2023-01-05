@@ -37,6 +37,8 @@ func (w *TransportClient) deleteTransfer(key string) {
 	defer w.transferLock.Unlock()
 	w.transferLock.Lock()
 	delete(w.transfers, key)
+	log.Println("transfer连接删除:", key)
+	_ = w.DefaultInvoker().WriteInvoke(NewInvokeRequest(key, InvokePath_Transfer_Disconnect))
 }
 
 func (w *TransportClient) setTransfer(key string, value *TransferSession) {
@@ -128,7 +130,7 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 		if w.keepaliveRun {
 			return
 		}
-		go w.heartbeat()
+		//go w.heartbeat()
 		w.keepaliveRun = true
 		for {
 			select {
@@ -149,8 +151,8 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 func (w *TransportClient) initEvents() {
 	w.invokeRoute.AddRpcHandler(InvokePath_Client_Kick, w.onKick)               //当前用户被踢下线
 	w.invokeRoute.AddRpcHandler(InvokePath_Transfer_Listen, w.onTransferListen) //收到添加转发通道的命令
-	w.invokeRoute.AddRpcHandler(InvokePath_Transfer_Dial, w.onTransferConnTarget)
-	w.invokeRoute.AddRpcHandler(InvokePath_Transfer_Go, w.onTransferGo)
+	w.invokeRoute.AddUniHandler(InvokePath_Transfer_Dial, w.onTransferConnDial)
+	w.invokeRoute.AddUniHandler(InvokePath_Transfer_Go, w.onTransferGo)
 }
 
 func (w *TransportClient) onKick(invoker *Invoker, request *InvokeRequest) *InvokeResponse {
@@ -270,27 +272,26 @@ func (w *TransportClient) connectTarget(connId string, tq *TransferRequest) erro
 		// 此处写入1个前置字节，只是为了推动流在服务端能够AcceptStream
 		b := []byte{88}
 		_ = utils.WriteBytes(invoker, b)
-		transferStream := NewTransferStream(connId, invoker, conn)
+		transferStream := NewTransferSession(connId, invoker)
+		transferStream.SetTargetStream(conn)
+		w.setTransfer(connId, transferStream)
 		transferStream.Transfer()
 	})
 }
 
-func (w *TransportClient) onTransferConnTarget(_ *Invoker, r *InvokeRequest) *InvokeResponse {
+func (w *TransportClient) onTransferConnDial(_ *Invoker, r *InvokeRequest) {
 	transferMapReq := &TransferRequest{}
 	utils.GetJsonValue(transferMapReq, r.BodyJson)
 	connId := r.Header[HeadKey_ConnectionId]
 	if err := w.connectTarget(connId, transferMapReq); err != nil {
-		return NewErrorResponse(r, fmt.Sprintf("被控通道[%v]连接到目标服务[%v]失败:%v",
+		log.Println(fmt.Sprintf("被控通道[%v]连接到目标服务[%v]失败:%v",
 			transferMapReq.TargetTerminalTunnelId, transferMapReq.TargetTerminalUri, err.Error()))
 	}
-	s := fmt.Sprintf("被控通道[%v]已成功连接到目标服务[%v]",
-		transferMapReq.TargetTerminalTunnelId, transferMapReq.TargetTerminalUri)
-	resp := NewSuccessResponse(r, nil)
-	resp.ResultMessage = s
-	return resp
+
+	log.Println("transfer连接建立:", connId)
 }
 
-func (w *TransportClient) onTransferGo(invoker *Invoker, r *InvokeRequest) *InvokeResponse {
+func (w *TransportClient) onTransferGo(invoker *Invoker, r *InvokeRequest) {
 	connId := r.Header[HeadKey_ConnectionId]
 	transfer := w.getTransfer(connId)
 	if transfer != nil {
@@ -298,7 +299,6 @@ func (w *TransportClient) onTransferGo(invoker *Invoker, r *InvokeRequest) *Invo
 	} else {
 		log.Println("Transfer连接丢失:", connId)
 	}
-	return NewSuccessResponse(r, nil)
 }
 
 func NewTransferClient(ctx context.Context, clientInfo *ClientConnInfo) *TransportClient {

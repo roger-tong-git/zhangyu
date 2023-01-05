@@ -9,7 +9,7 @@ import (
 type TransferSession struct {
 	transferChan chan bool
 	transport    *http.Transport
-	*TransferStream
+	TransferStream
 	utils.Closer
 }
 
@@ -27,7 +27,7 @@ func (t *TransferSession) TransferChan() chan bool {
 
 func NewTransferSession(connId string, sourceStream SessionReadWriter) *TransferSession {
 	re := &TransferSession{transferChan: make(chan bool, 1)}
-	re.TransferStream = NewTransferStream(connId, sourceStream, nil)
+	re.TransferStream = *NewTransferStream(connId, sourceStream, nil)
 	re.SetCtx(sourceStream.Ctx())
 	re.SetOnClose(func() {
 		if s := re.SourceStream(); s != nil {
@@ -42,7 +42,7 @@ func NewTransferSession(connId string, sourceStream SessionReadWriter) *Transfer
 
 func NewTransferSessionWithValue(ctx context.Context, connId string) *TransferSession {
 	re := &TransferSession{transferChan: make(chan bool)}
-	re.TransferStream = NewTransferStream(connId, nil, nil)
+	re.TransferStream = *NewTransferStream(connId, nil, nil)
 	re.SetCtx(ctx)
 	re.SetOnClose(func() {
 		if s := re.SourceStream(); s != nil {

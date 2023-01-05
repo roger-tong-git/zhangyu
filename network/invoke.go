@@ -9,6 +9,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 )
 
 type InvokeTerminal int
@@ -192,8 +193,8 @@ func (s *Invoker) Invoke(r *InvokeRequest) (*InvokeResponse, error) {
 	}
 
 	select {
-	case <-s.Ctx().Done():
-		return nil, WebTransportConnectError
+	case <-time.After(time.Second * 5):
+		return nil, errors.New(fmt.Sprintf("Invoke[%v]TimeOut:%v", s.connId, r.Path))
 	case re := <-respChan:
 		return re, nil
 	}
@@ -302,8 +303,9 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker, HeartbeatHandler func(*In
 					}()
 					continue
 				}
-
-				log.Println(fmt.Sprintf("找不到[%v]对应的处理过程", req.Path))
+				if req.Path != "" {
+					log.Println(fmt.Sprintf("找不到[%v]对应的处理过程", req.Path))
+				}
 				continue
 			}
 		}
