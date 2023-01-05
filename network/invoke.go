@@ -193,7 +193,7 @@ func (s *Invoker) Invoke(r *InvokeRequest) (*InvokeResponse, error) {
 	case <-s.Ctx().Done():
 		return nil, WebTransportConnectError
 	case re := <-respChan:
-		s.deleteInvokeMap(r.RequestId)
+		go s.deleteInvokeMap(r.RequestId)
 		return re, nil
 	}
 }
@@ -246,7 +246,7 @@ func (r *InvokeRoute) HasInvoke(connId string) bool {
 	return ok
 }
 
-func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
+func (r *InvokeRoute) DispatchInvoke(invoker *Invoker, HeartbeatHandler func(*InvokeRequest)) {
 	for {
 		if !r.HasInvoke(invoker.connId) {
 			break
@@ -258,6 +258,12 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 			return
 		} else {
 			if req != nil {
+				if req.Path == InvokePath_Client_Heartbeat {
+					if HeartbeatHandler != nil {
+						go HeartbeatHandler(req)
+					}
+					continue
+				}
 				go func() {
 					handler := r.GetHandler(strings.TrimSpace(strings.ToLower(req.Path)))
 					var callResp *InvokeResponse
@@ -276,7 +282,7 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 					}
 				}()
 			} else if resp != nil {
-				invoker.receiveResponse(resp)
+				go invoker.receiveResponse(resp)
 			}
 		}
 	}

@@ -110,14 +110,7 @@ func (w *TransportClient) heartbeat() {
 				continue
 			}
 			req := NewInvokeRequest(w.clientInfo.TerminalId, InvokePath_Client_Heartbeat)
-			cliInfo := &ClientConnInfo{}
-			cliInfo.TerminalId = w.clientInfo.TerminalId
-			cliInfo.ConnectionId = w.clientInfo.ConnectionId
-			cliInfo.TunnelId = w.clientInfo.TunnelId
-			cliInfo.Token = w.clientInfo.Token
-			cliInfo.Type = w.clientInfo.Type
-			req.BodyJson = utils.GetJsonString(cliInfo)
-			_ = w.Invoke(req)
+			_ = WriteInvoke(w.DefaultInvoker().WriterLock(), w.DefaultInvoker(), req)
 		}
 	}
 }
@@ -125,7 +118,7 @@ func (w *TransportClient) heartbeat() {
 func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 	_ = w.Dial(addr, w.clientInfo.ConnectionId, Connection_Command, func(invoker *Invoker) {
 		w.invokeRoute.SetDefaultInvoker(invoker)
-		go w.invokeRoute.DispatchInvoke(invoker)
+		go w.invokeRoute.DispatchInvoke(invoker, nil)
 		if connectedHandler != nil {
 			connectedHandler()
 		}
@@ -299,10 +292,9 @@ func (w *TransportClient) onTransferConnTarget(_ *Invoker, r *InvokeRequest) *In
 func (w *TransportClient) onTransferGo(invoker *Invoker, r *InvokeRequest) *InvokeResponse {
 	connId := r.Header[HeadKey_ConnectionId]
 	transfer := w.getTransfer(connId)
-	if transfer == nil {
-		return NewErrorResponse(r, fmt.Sprintf("找不到ConnId[%v]", connId))
+	if transfer != nil {
+		transfer.TransferChan() <- true
 	}
-	transfer.TransferChan() <- true
 	return NewSuccessResponse(r, nil)
 }
 

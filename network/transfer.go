@@ -3,12 +3,22 @@ package network
 import (
 	"context"
 	"github.com/roger-tong-git/zhangyu/utils"
+	"net/http"
 )
 
 type TransferSession struct {
 	transferChan chan bool
+	transport    *http.Transport
 	*TransferStream
 	utils.Closer
+}
+
+func (t *TransferSession) Transport() *http.Transport {
+	return t.transport
+}
+
+func (t *TransferSession) SetTransport(transport *http.Transport) {
+	t.transport = transport
 }
 
 func (t *TransferSession) TransferChan() chan bool {
