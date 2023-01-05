@@ -140,6 +140,7 @@ func NewNode(ctx context.Context) *Node {
 		if v, ok := value.(*network.TransferSession); ok {
 			_ = v.Close()
 			go node.transfers.Delete(key)
+			log.Println("Delete Transfer:", key)
 		}
 	})
 
@@ -190,11 +191,13 @@ func (s *Node) initEtcd() {
 }
 
 func (s *Node) initInvokeHandles() {
-	s.invokeRoute.AddHandler(network.InvokePath_Client_Register, s.invokeClientRegister)
-	s.invokeRoute.AddHandler(network.InvokePath_Client_Login, s.invokeClientLogin)
-	//	s.invokeRoute.AddHandler(network.InvokePath_Client_Heartbeat, s.invokeClientHeartbeat)
-	s.invokeRoute.AddHandler(network.InvokePath_Client_Transfer_List, s.invokeClientTransferList)
-	//	s.invokeRoute.AddHandler(network.InvokePath_Domain_Info, s.getDomainInfo)
+	s.invokeRoute.AddRpcHandler(network.InvokePath_Client_Register, s.invokeClientRegister)
+	s.invokeRoute.AddRpcHandler(network.InvokePath_Client_Login, s.invokeClientLogin)
+	//	s.invokeRoute.AddRpcHandler(network.InvokePath_Client_Heartbeat, s.invokeClientHeartbeat)
+	s.invokeRoute.AddRpcHandler(network.InvokePath_Client_Transfer_List, s.invokeClientTransferList)
+	s.invokeRoute.AddUniHandler(network.InvokePath_Client_Heartbeat, s.invokeHeartbeat)
+
+	//	s.invokeRoute.AddRpcHandler(network.InvokePath_Domain_Info, s.getDomainInfo)
 }
 
 func (s *Node) initHttpHandlers(e *echo.Echo) {
@@ -248,7 +251,6 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 
 				if transport := transfer.Transport(); transport != nil {
-					s.transfers.SetExpire(httpConnId, time.Second*5)
 					outReq := &http.Request{}
 					*outReq = *r
 					outReq.Host = targetUri.Host
@@ -347,8 +349,8 @@ func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 		} else {
 			invoker := s.invokeRoute.AddInvoker(connectionId, session, stream)
 			if isCmdTrans {
-				go s.invokeRoute.DispatchInvoke(invoker, func(request *network.InvokeRequest) {
-					s.clients.SetExpire(invoker.ConnId(), time.Second*15)
+				s.invokeRoute.DispatchInvoke(invoker, func(request *network.InvokeRequest) {
+					go s.clients.SetExpire(invoker.ConnId(), time.Second*15)
 				})
 			} else {
 				if isTransferListen {
@@ -668,4 +670,8 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 			}
 		}()
 	}
+}
+
+func (s *Node) invokeHeartbeat(invoker *network.Invoker, request *network.InvokeRequest) {
+	s.clients.SetExpire(invoker.ConnId(), time.Second*15)
 }

@@ -15,12 +15,8 @@ type InvokeTerminal int
 type InvokeResultCode int
 
 const (
-	InvokeTerminal_Node     = InvokeTerminal(1)
-	InvokeTerminal_Client   = InvokeTerminal(2)
-	InvokeTerminal_Instance = InvokeTerminal(3)
-	InvokeResult_Success    = InvokeResultCode(200)
-	InvokeResult_Error      = InvokeResultCode(400)
-	InvokeResult_Warn       = InvokeResultCode(300)
+	InvokeResult_Success = InvokeResultCode(200)
+	InvokeResult_Error   = InvokeResultCode(400)
 )
 
 var WebTransportConnectError = errors.New("到服务端的连接断开")
@@ -54,7 +50,8 @@ func NewErrorResponse(r *InvokeRequest, message string) *InvokeResponse {
 	}
 }
 
-type InvokeHandler func(invoker *Invoker, request *InvokeRequest) *InvokeResponse
+type RpcInvokeHandler func(invoker *Invoker, request *InvokeRequest) *InvokeResponse
+type UniInvokeHandler func(invoker *Invoker, request *InvokeRequest)
 
 type InvokeResponse struct {
 	RequestId     string
@@ -183,23 +180,28 @@ func (s *Invoker) WriteInvoke(r any) error {
 }
 
 func (s *Invoker) Invoke(r *InvokeRequest) (*InvokeResponse, error) {
-	respChan := make(chan *InvokeResponse, 1)
+	defer func() {
+		go s.deleteInvokeMap(r.RequestId)
+	}()
+
+	respChan := make(chan *InvokeResponse)
 	s.setInvokeMap(r.RequestId, respChan)
 	if err := s.WriteInvoke(r); err != nil {
 		s.CtxCancel()
 		return nil, err
 	}
+
 	select {
 	case <-s.Ctx().Done():
 		return nil, WebTransportConnectError
 	case re := <-respChan:
-		go s.deleteInvokeMap(r.RequestId)
 		return re, nil
 	}
 }
 
 type InvokeRoute struct {
-	handlers       map[string]InvokeHandler
+	rpcHandlers    map[string]RpcInvokeHandler
+	uniHandlers    map[string]UniInvokeHandler
 	invokes        map[string]*Invoker
 	defaultInvoker *Invoker
 	handlerLock    sync.Mutex
@@ -216,27 +218,45 @@ func (r *InvokeRoute) SetDefaultInvoker(defaultInvoker *Invoker) {
 }
 
 func NewInvokeRoute(ctx context.Context) *InvokeRoute {
-	re := &InvokeRoute{handlers: map[string]InvokeHandler{}, invokes: map[string]*Invoker{}}
+	re := &InvokeRoute{rpcHandlers: map[string]RpcInvokeHandler{}, uniHandlers: map[string]UniInvokeHandler{}, invokes: map[string]*Invoker{}}
 	re.SetCtx(ctx)
 	return re
 }
 
-func (r *InvokeRoute) AddHandler(path string, handler InvokeHandler) {
+func (r *InvokeRoute) AddRpcHandler(path string, handler RpcInvokeHandler) {
 	defer r.handlerLock.Unlock()
 	r.handlerLock.Lock()
-	r.handlers[strings.ToLower(strings.TrimSpace(path))] = handler
+	r.rpcHandlers[strings.ToLower(strings.TrimSpace(path))] = handler
 }
 
-func (r *InvokeRoute) RemoveHandler(path string) {
+func (r *InvokeRoute) AddUniHandler(path string, handler UniInvokeHandler) {
 	defer r.handlerLock.Unlock()
 	r.handlerLock.Lock()
-	delete(r.handlers, strings.ToLower(strings.TrimSpace(path)))
+	r.uniHandlers[strings.ToLower(strings.TrimSpace(path))] = handler
 }
 
-func (r *InvokeRoute) GetHandler(path string) InvokeHandler {
+func (r *InvokeRoute) RemoveUniHandler(path string) {
 	defer r.handlerLock.Unlock()
 	r.handlerLock.Lock()
-	return r.handlers[strings.ToLower(strings.TrimSpace(path))]
+	delete(r.uniHandlers, strings.ToLower(strings.TrimSpace(path)))
+}
+
+func (r *InvokeRoute) GetUniHandler(path string) UniInvokeHandler {
+	defer r.handlerLock.Unlock()
+	r.handlerLock.Lock()
+	return r.uniHandlers[strings.ToLower(strings.TrimSpace(path))]
+}
+
+func (r *InvokeRoute) RemoveRpcHandler(path string) {
+	defer r.handlerLock.Unlock()
+	r.handlerLock.Lock()
+	delete(r.rpcHandlers, strings.ToLower(strings.TrimSpace(path)))
+}
+
+func (r *InvokeRoute) GetRpcHandler(path string) RpcInvokeHandler {
+	defer r.handlerLock.Unlock()
+	r.handlerLock.Lock()
+	return r.rpcHandlers[strings.ToLower(strings.TrimSpace(path))]
 }
 
 func (r *InvokeRoute) HasInvoke(connId string) bool {
@@ -257,32 +277,34 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker, HeartbeatHandler func(*In
 			r.RemoveInvoker(invoker.connId)
 			return
 		} else {
+			if resp != nil {
+				go invoker.receiveResponse(resp)
+				continue
+			}
+
 			if req != nil {
-				if req.Path == InvokePath_Client_Heartbeat {
-					if HeartbeatHandler != nil {
-						go HeartbeatHandler(req)
-					}
+				uniHandler := r.GetUniHandler(req.Path)
+				if uniHandler != nil {
+					go uniHandler(invoker, req)
 					continue
 				}
-				go func() {
-					handler := r.GetHandler(strings.TrimSpace(strings.ToLower(req.Path)))
-					var callResp *InvokeResponse
-					if handler != nil {
-						callResp = handler(invoker, req)
-					} else {
-						str := fmt.Sprintf("无效的路由：%v", req.Path)
-						callResp = NewInvokeResponse(req.RequestId, InvokeResult_Error, str)
-					}
 
-					if callErr := invoker.WriteInvoke(callResp); callErr != nil {
-						invoker.CtxCancel()
-						r.RemoveInvoker(invoker.connId)
-						log.Println("WriteInvoke Error", callErr)
-						return
-					}
-				}()
-			} else if resp != nil {
-				go invoker.receiveResponse(resp)
+				rpcHandler := r.GetRpcHandler(req.Path)
+				if rpcHandler != nil {
+					go func() {
+						var callResp *InvokeResponse
+						callResp = rpcHandler(invoker, req)
+						if callErr := invoker.WriteInvoke(callResp); callErr != nil {
+							invoker.CtxCancel()
+							go r.RemoveInvoker(invoker.connId)
+							return
+						}
+					}()
+					continue
+				}
+
+				log.Println(fmt.Sprintf("找不到[%v]对应的处理过程", req.Path))
+				continue
 			}
 		}
 	}

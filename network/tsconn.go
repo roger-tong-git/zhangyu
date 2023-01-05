@@ -147,10 +147,10 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 }
 
 func (w *TransportClient) initEvents() {
-	w.invokeRoute.AddHandler(InvokePath_Client_Kick, w.onKick)               //当前用户被踢下线
-	w.invokeRoute.AddHandler(InvokePath_Transfer_Listen, w.onTransferListen) //收到添加转发通道的命令
-	w.invokeRoute.AddHandler(InvokePath_Transfer_Dial, w.onTransferConnTarget)
-	w.invokeRoute.AddHandler(InvokePath_Transfer_Go, w.onTransferGo)
+	w.invokeRoute.AddRpcHandler(InvokePath_Client_Kick, w.onKick)               //当前用户被踢下线
+	w.invokeRoute.AddRpcHandler(InvokePath_Transfer_Listen, w.onTransferListen) //收到添加转发通道的命令
+	w.invokeRoute.AddRpcHandler(InvokePath_Transfer_Dial, w.onTransferConnTarget)
+	w.invokeRoute.AddRpcHandler(InvokePath_Transfer_Go, w.onTransferGo)
 }
 
 func (w *TransportClient) onKick(invoker *Invoker, request *InvokeRequest) *InvokeResponse {
@@ -219,10 +219,12 @@ func (w *TransportClient) AppendTransferListen(tq *TransferRequest) error {
 								select {
 								case <-transferStream.Ctx().Done():
 									w.deleteTransfer(connId)
+									log.Println("Delete ConnId(Done):", connId)
 									return
 								default:
 									transferStream.Transfer()
 									w.deleteTransfer(connId)
+									log.Println("Delete ConnId:", connId)
 								}
 							}()
 						})
@@ -283,7 +285,6 @@ func (w *TransportClient) onTransferConnTarget(_ *Invoker, r *InvokeRequest) *In
 	}
 	s := fmt.Sprintf("被控通道[%v]已成功连接到目标服务[%v]",
 		transferMapReq.TargetTerminalTunnelId, transferMapReq.TargetTerminalUri)
-	log.Println(s)
 	resp := NewSuccessResponse(r, nil)
 	resp.ResultMessage = s
 	return resp
@@ -294,6 +295,8 @@ func (w *TransportClient) onTransferGo(invoker *Invoker, r *InvokeRequest) *Invo
 	transfer := w.getTransfer(connId)
 	if transfer != nil {
 		transfer.TransferChan() <- true
+	} else {
+		log.Println("Transfer连接丢失:", connId)
 	}
 	return NewSuccessResponse(r, nil)
 }

@@ -8,10 +8,12 @@ import (
 )
 
 type CacheItem[T any] struct {
+	version    int64
 	Value      T
 	Key        string
 	cache      *Cache[T]
 	expireChan <-chan time.Time
+	expireLock sync.Mutex
 	Closer
 }
 
@@ -20,17 +22,22 @@ func (c *CacheItem[T]) removeItem() {
 }
 
 func (c *CacheItem[T]) expire(duration time.Duration) {
+	defer c.expireLock.Unlock()
+	c.expireLock.Lock()
+
 	curChan := time.After(duration)
 	c.expireChan = curChan
-	go func() {
+	c.version = c.version + 1
+	go func(version int64, curChan <-chan time.Time) {
 		<-curChan
-		if curChan == c.expireChan {
-			go c.cache.Delete(c.Key)
-			if c.cache.expireHandler != nil {
-				c.cache.expireHandler(c.Key, c.Value)
-			}
+		if c.version != version {
+			return
 		}
-	}()
+		go c.cache.Delete(c.Key)
+		if c.cache.expireHandler != nil {
+			c.cache.expireHandler(c.Key, c.Value)
+		}
+	}(c.version, curChan)
 }
 
 func newCacheItem[T any](ctx context.Context, key string, value T, cache *Cache[T]) *CacheItem[T] {
@@ -75,15 +82,13 @@ func (s *Cache[T]) Set(key string, value T) {
 	s.mapLocker.Lock()
 
 	key = s.getKey(key)
-	maxDuration := time.Hour * 24 * 365 * 100
 
 	if v, ok := s.cacheMap[key]; ok {
 		v.Value = value
-		v.expire(maxDuration)
+		v.version = v.version + 1
 	} else {
 		item := newCacheItem(s.Ctx(), key, value, s)
 		s.cacheMap[key] = item
-		item.expire(maxDuration)
 	}
 }
 
