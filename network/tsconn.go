@@ -76,10 +76,7 @@ func (w *TransportClient) Dial(addr string, connId string, connType string, conn
 	header.Set(HeadKey_TunnelId, w.clientInfo.TunnelId)
 	header.Set(HeadKey_ConnectionId, connId)
 	header.Set(HeadKey_ConnectionType, connType)
-	return w.DialWithHeader(addr, connId, header, connectedHandler)
-}
 
-func (w *TransportClient) DialWithHeader(addr string, connId string, header http.Header, connectedHandler func(*Invoker)) error {
 	var err error
 	var d webtransport.Dialer
 	var session *webtransport.Session
@@ -103,7 +100,7 @@ func (w *TransportClient) DialWithHeader(addr string, connId string, header http
 	}
 }
 
-func (w *TransportClient) sayOnline() {
+func (w *TransportClient) heartbeat() {
 	for {
 		select {
 		case <-w.Ctx().Done():
@@ -112,7 +109,7 @@ func (w *TransportClient) sayOnline() {
 			if !w.Connected() {
 				continue
 			}
-			req := NewInvokeRequest(w.clientInfo.TerminalId, InvokePath_Client_SayOnline)
+			req := NewInvokeRequest(w.clientInfo.TerminalId, InvokePath_Client_Heartbeat)
 			cliInfo := &ClientConnInfo{}
 			cliInfo.TerminalId = w.clientInfo.TerminalId
 			cliInfo.ConnectionId = w.clientInfo.ConnectionId
@@ -138,7 +135,7 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 		if w.keepaliveRun {
 			return
 		}
-		go w.sayOnline()
+		go w.heartbeat()
 		w.keepaliveRun = true
 		for {
 			select {
@@ -154,49 +151,6 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 			}
 		}
 	}()
-
-	//var err error
-	//header := http.Header{}
-	//header.Set(HeadKey_TerminalId, w.clientInfo.TerminalId)
-	//header.Set(HeadKey_ConnectionId, w.clientInfo.ConnectionId)
-	//header.Set(HeadKey_ConnectionType, Connection_Command)
-	//
-	//var d webtransport.Dialer
-	//var session *webtransport.Session
-	//d.RoundTripper = &http3.RoundTripper{}
-	//d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	//
-	//if !w.connected {
-	//	if _, session, err = d.Dial(w.Ctx(), addr, header); err != nil {
-	//		return err
-	//	}
-	//
-	//	if stream, err1 := session.OpenStream(); err1 != nil {
-	//		return err1
-	//	} else {
-	//		w.lastAddr = addr
-	//		ip := strings.Split(session.RemoteAddr().String(), ":")[0]
-	//		invoker := w.invokeRoute.AddInvoker(ip, w.clientInfo.ConnectionId, stream, stream)
-	//		go w.invokeRoute.DispatchInvoke(invoker)
-	//		w.invokeRoute.SetDefaultInvoker(invoker)
-	//		w.connected = true
-	//		if connectedHandler != nil {
-	//			w.connectedHandler = connectedHandler
-	//			connectedHandler()
-	//		}
-	//
-	//		go func() {
-	//			select {
-	//			case <-invoker.Ctx().Done():
-	//				return
-	//			default:
-	//				_ = w.ConnectTo(addr, w.connectedHandler)
-	//			}
-	//		}()
-	//	}
-	//} else {
-	//	time.Sleep(time.Second)
-	//}
 }
 
 func (w *TransportClient) initEvents() {
@@ -318,6 +272,9 @@ func (w *TransportClient) connectTarget(connId string, tq *TransferRequest) erro
 	}
 
 	return w.Dial(w.lastAddr, connId, Connection_Instance_Target, func(invoker *Invoker) {
+		// 此处写入1个前置字节，只是为了推动流在服务端能够AcceptStream
+		b := []byte{88}
+		_ = utils.WriteBytes(invoker, b)
 		transferStream := NewTransferStream(connId, invoker, conn)
 		transferStream.Transfer()
 	})

@@ -15,6 +15,7 @@ import (
 	"github.com/roger-tong-git/zhangyu/app"
 	"github.com/roger-tong-git/zhangyu/network"
 	"github.com/roger-tong-git/zhangyu/utils"
+	"io"
 	"log"
 	"math/big"
 	rand2 "math/rand"
@@ -31,12 +32,10 @@ type Node struct {
 	TerminalId    string //设备ID
 	EtcdUri       string //Etcd连接字符串
 	QuicPort      int
-	FrontPort     int
 	ClientTimeOut int
 	connectionId  string
 	invokeRoute   *network.InvokeRoute
 	etcdOp        *EtcdOp
-	h3Server      *http3.Server
 	clients       *utils.Cache[*app.ClientSession]
 	transfers     map[string]*network.TransferSession
 	transferLock  sync.Mutex
@@ -147,7 +146,7 @@ func NewNode(ctx context.Context) *Node {
 	utils.ReadJsonSetting("node.json", node, func() {
 		node.TerminalId = uuid.New().String()
 		node.QuicPort = 18888
-		node.FrontPort = 18889
+		//node.FrontPort = 18889
 		node.ClientTimeOut = 20
 	})
 
@@ -192,71 +191,27 @@ func (s *Node) initEtcd() {
 		_, leaseId := s.etcdOp.CreateLease(5, true)
 		_, _ = s.etcdOp.PutValueWithLease(s.etcdOp.GetNodeKey(s.TerminalId), nodeInfo, leaseId)
 		s.etcdOp.AddWatcher(EtcdKey_Node, s.nodeWatcher)
-		//		s.etcdOp.AddWatcher(EtcdKey_Client_Connection, s.clientLoginWatcher)
-		//s.addEtcdCmdWatcher(EtcdKey_Transfer_Local_ListenIn, s.etcdCmdTransferListenIn)
-		//s.addEtcdCmdWatcher(EtcdKey_Transfer_Local_TargetIn, s.etcdCmdTransferTargetIn)
-
-		//		s.etcdOp.AddWatcher(GetEtcdCommandPrefix(EtcdKey_Transfer_Local_ListenIn,s.TerminalId),s.)
-		//		s.etcdOp.AddWatcher(fmt.Sprintf(EtcdKey_Transfer_Local_TargetIn, s.TerminalId), s.etcdCmdTransferTargetIn)
-
 	} else {
 		log.Panicln("没有配置Etcd连接")
 	}
 }
 
 func (s *Node) initInvokeHandles() {
-	s.invokeRoute.AddHandler(network.InvokePath_Client_Register, s.clientRegister)
-	s.invokeRoute.AddHandler(network.InvokePath_Client_Login, s.clientLogin)
-	s.invokeRoute.AddHandler(network.InvokePath_Client_SayOnline, s.clientSayOnline)
-	s.invokeRoute.AddHandler(network.InvokePath_Client_Transfer_List, s.getClientTransferMapList)
+	s.invokeRoute.AddHandler(network.InvokePath_Client_Register, s.invokeClientRegister)
+	s.invokeRoute.AddHandler(network.InvokePath_Client_Login, s.invokeClientLogin)
+	s.invokeRoute.AddHandler(network.InvokePath_Client_Heartbeat, s.invokeClientHeartbeat)
+	s.invokeRoute.AddHandler(network.InvokePath_Client_Transfer_List, s.invokeClientTransferList)
 	//	s.invokeRoute.AddHandler(network.InvokePath_Domain_Info, s.getDomainInfo)
 }
 
 func (s *Node) initHttpHandlers(e *echo.Echo) {
-	e.GET("/_zhangyu/test", s.onHttpTest)
-	e.POST(network.HttpPath_Transfer_Add, s.onHttpPortAdd)
+	e.GET("/_zhangyu/test", s.httpTest)
+	e.POST(network.HttpPath_Transfer_Add, s.httpTransferAdd)
 }
-
-//func (s *Node) transfer(r network.SessionReadWriter) {
-//	req, _, err := network.ReadInvoke(r.ReaderLock(), r)
-//	if err != nil {
-//		log.Println(err)
-//		return
-//	}
-//
-//	connId := req.Header[network.HeadKey_ConnectionId]
-//	transfer := network.NewTransferSession(r)
-//	s.setTransfer(connId, transfer)
-//
-//	go func() {
-//		mapRequest := &network.TransferRequest{}
-//		utils.GetJsonValue(mapRequest, req.BodyJson)
-//		invResp := s.connectTarget(mapRequest, connId)
-//
-//		invErr := network.WriteInvoke(r.WriterLock(), r, invResp)
-//		if invErr != nil {
-//			log.Println(invErr)
-//			_ = r.Close()
-//			s.deleteTransfer(connId)
-//			return
-//		}
-//	}()
-//
-//	select {
-//	case <-s.Ctx().Done():
-//		_ = transfer.Close()
-//		s.deleteTransfer(connId)
-//		return
-//	case <-transfer.TransferChan():
-//		transfer.Transfer()
-//		s.deleteTransfer(transfer.TransferId())
-//	}
-//}
 
 func (s *Node) createRoundTripper(invoker *network.Invoker) *http.Transport {
 	re := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -267,42 +222,6 @@ func (s *Node) createRoundTripper(invoker *network.Invoker) *http.Transport {
 	}
 	return re
 }
-
-// 通知被控通道，建立一条流量连接到服务端
-//func (s *Node) connectTarget(mapRequest *network.TransferRequest, connId string) *network.InvokeResponse {
-//	connKey := fmt.Sprintf("%v/%v", EtcdKey_Client_Connection, mapRequest.TargetTerminalTunnelId)
-//	targetSession := &app.ClientSession{}
-//	invResp := &network.InvokeResponse{}
-//	//检查目标tunnel是否在线
-//	if s.etcdOp.GetJsonValue(connKey, targetSession) {
-//		//核对校验码
-//		if mapRequest.TargetTerminalAuthCode != targetSession.AuthCode {
-//			invResp.ResultCode = network.InvokeResult_Error
-//			invResp.ResultMessage = fmt.Sprintf("转发调用失败,被控通道[%v]的验证码不正确", mapRequest.TargetTerminalTunnelId)
-//		} else {
-//			targetReq := network.NewInvokeRequest(uuid.New().String(), network.InvokePath_Transfer_Dial)
-//			targetReq.BodyJson = utils.GetJsonString(mapRequest)
-//			targetReq.Header["ConnectionId"] = connId
-//			if session := s.clients.Get(targetSession.ConnectionId); session != nil {
-//				//发送连接指令，通知目标tunnel建立流量连接
-//				if targetResp, targetErr := session.ClientInvoker.Invoke(targetReq); targetErr != nil {
-//					invResp.ResultCode = network.InvokeResult_Error
-//					invResp.ResultMessage = fmt.Sprintf("被控通道接入出错：%v", targetErr)
-//				} else {
-//					invResp.ResultCode = targetResp.ResultCode
-//					invResp.ResultMessage = targetResp.ResultMessage
-//				}
-//			} else {
-//				invResp.ResultCode = network.InvokeResult_Error
-//				invResp.ResultMessage = "被控通道接入出错：跨服务端的功能还未完成开发"
-//			}
-//		}
-//	} else {
-//		invResp.ResultCode = network.InvokeResult_Error
-//		invResp.ResultMessage = fmt.Sprintf("转发调用失败,被控通道[%v]不在线", mapRequest.TargetTerminalTunnelId)
-//	}
-//	return invResp
-//}
 
 func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.RequestURI() != network.WebSocket_ServicePath {
@@ -315,22 +234,20 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			targetCliKey := fmt.Sprintf("%v/%v", EtcdKey_Client_Connection, tq.TargetTerminalTunnelId)
 			targetUri, _ := url.Parse(tq.TargetTerminalUri)
 			if s.etcdOp.GetJsonValue(targetCliKey, targetCliConn) {
-				httpConnId := fmt.Sprintf("%v|%v", r.RemoteAddr, tq.TargetTerminalTunnelId)
-				transfer := s.getTransfer(httpConnId)
-				if transfer == nil {
-					transfer = network.NewTransferSessionWithValue(s.Ctx(), httpConnId)
-					s.setTransfer(transfer.TransferId(), transfer)
+				httpConnId := uuid.New().String()
+				transfer := network.NewTransferSessionWithValue(s.Ctx(), httpConnId)
+				s.setTransfer(transfer.TransferId(), transfer)
 
-					req := network.NewInvokeRequest(uuid.New().String(), network.InvokePath_Transfer_Dial)
-					req.Header[network.HeadKey_ConnectionId] = httpConnId
-					req.Header[network.HeadKey_TunnelId] = tq.TargetTerminalTunnelId
-					req.BodyJson = utils.GetJsonString(tq)
-					go func() {
-						s.transfer(req, false)
-					}()
-				}
+				req := network.NewInvokeRequest(uuid.New().String(), network.InvokePath_Transfer_Dial)
+				req.Header[network.HeadKey_ConnectionId] = httpConnId
+				req.Header[network.HeadKey_TunnelId] = tq.TargetTerminalTunnelId
+				req.BodyJson = utils.GetJsonString(tq)
+				go func() {
+					s.transfer(req, false)
+				}()
 
 				<-transfer.TransferChan()
+				log.Println("http transportCount:", len(s.transfers))
 				if targetStream := transfer.TargetStream(); targetStream != nil {
 					if invoker, ok := targetStream.(*network.Invoker); ok {
 						outReq := &http.Request{}
@@ -345,7 +262,7 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 								w.Header().Set(k, value)
 							}
 							w.WriteHeader(resp.StatusCode)
-							_ = resp.Write(w)
+							_, _ = io.Copy(w, resp.Body)
 						}
 					}
 				}
@@ -358,58 +275,58 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Node) initFront() {
-	if s.FrontPort == 0 {
-		s.FrontPort = 19999
-	}
-	addr := fmt.Sprintf("0.0.0.0:%v", s.FrontPort)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalln(err)
-	}
-
-	log.Println(fmt.Sprintf("已开启前端服务[%v]", addr))
-
-	go func() {
-		for {
-			select {
-			case <-s.Ctx().Done():
-				return
-			default:
-				conn, err := listener.Accept()
-				go func() {
-					if err == nil {
-						r := network.NewConnWrapper(s.Ctx(), "", conn)
-						req, _, err := network.ReadInvoke(r.ReaderLock(), r)
-						if err != nil {
-							log.Println(err)
-							return
-						}
-
-						connId := req.Header[network.HeadKey_ConnectionId]
-
-						transfer := network.NewTransferSession(connId, r)
-						s.setTransfer(connId, transfer)
-						rq := &network.TransferRequest{}
-						utils.GetJsonValue(rq, req.BodyJson)
-						s.etcdOp.PutValue(fmt.Sprintf(EtcdKey_Transfer_Local_TargetIn, s.TerminalId), rq)
-
-						select {
-						case <-s.Ctx().Done():
-							_ = transfer.Close()
-							s.deleteTransfer(connId)
-							return
-						case <-transfer.TransferChan():
-							transfer.Transfer()
-							s.deleteTransfer(transfer.TransferId())
-						}
-					}
-				}()
-			}
-		}
-	}()
-
-}
+//func (s *Node) initFront() {
+//	if s.FrontPort == 0 {
+//		s.FrontPort = 19999
+//	}
+//	addr := fmt.Sprintf("0.0.0.0:%v", s.FrontPort)
+//	listener, err := net.Listen("tcp", addr)
+//	if err != nil {
+//		log.Fatalln(err)
+//	}
+//
+//	log.Println(fmt.Sprintf("已开启前端服务[%v]", addr))
+//
+//	go func() {
+//		for {
+//			select {
+//			case <-s.Ctx().Done():
+//				return
+//			default:
+//				conn, err := listener.Accept()
+//				go func() {
+//					if err == nil {
+//						r := network.NewConnWrapper(s.Ctx(), "", conn)
+//						req, _, err := network.ReadInvoke(r.ReaderLock(), r)
+//						if err != nil {
+//							log.Println(err)
+//							return
+//						}
+//
+//						connId := req.Header[network.HeadKey_ConnectionId]
+//
+//						transfer := network.NewTransferSession(connId, r)
+//						s.setTransfer(connId, transfer)
+//						rq := &network.TransferRequest{}
+//						utils.GetJsonValue(rq, req.BodyJson)
+//						s.etcdOp.PutValue(fmt.Sprintf(EtcdKey_Transfer_Local_TargetIn, s.TerminalId), rq)
+//
+//						select {
+//						case <-s.Ctx().Done():
+//							_ = transfer.Close()
+//							s.deleteTransfer(connId)
+//							return
+//						case <-transfer.TransferChan():
+//							transfer.Transfer()
+//							s.deleteTransfer(transfer.TransferId())
+//						}
+//					}
+//				}()
+//			}
+//		}
+//	}()
+//
+//}
 
 func (s *Node) initQuic() {
 	addr := fmt.Sprintf("0.0.0.0:%v", s.QuicPort)
@@ -456,7 +373,6 @@ func (s *Node) initQuic() {
 		},
 	}
 
-	s.h3Server = h3
 	s.initInvokeHandles()
 	// 针对指定的路径，升级成WebTransport
 
@@ -493,15 +409,14 @@ func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 						log.Println(err)
 						_ = invoker.Close()
 					}
-					//_, _ = s.etcdOp.PutValueAndExpire(GetEtcdCommand(EtcdKey_Transfer_Local_ListenIn, s.TerminalId, connectionId), req, 5)
 					transfer := network.NewTransferSession(connectionId, invoker)
 					s.setTransfer(connectionId, transfer)
 					go s.transfer(req, true)
-
 				}
 
 				if isTransferTarget {
-					log.Println("isTransferTarget:", connectionId)
+					// 读取target流的前置字节
+					_, _ = utils.ReadBytes(invoker, 1)
 					transfer := s.getTransfer(connectionId)
 					if transfer != nil {
 						transfer.SetTargetStream(invoker)
@@ -533,7 +448,7 @@ func (s *Node) checkClientLogin(cliInfo *app.ClientSession, isNew bool) bool {
 }
 
 // 新的客户端连接
-func (s *Node) clientRegister(invoker *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
+func (s *Node) invokeClientRegister(invoker *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
 	cliInfo := &app.ClientSession{ClientInvoker: invoker, ClientIP: invoker.ConnIP()}
 	utils.GetJsonValue(cliInfo, r.BodyJson)
 	if !s.checkClientLogin(cliInfo, true) {
@@ -556,14 +471,14 @@ func (s *Node) clientRegister(invoker *network.Invoker, r *network.InvokeRequest
 				cliInfo.Token = utils.RandStringWithFullChar(64)
 				cliInfo.AuthCode = utils.RandStringWithLetterChar(8)
 				_, _ = s.etcdOp.PutValue(cliRecKey, cliInfo.ClientInfo)
-				return s.updateClients(r, cliInfo)
+				return s.updateinvokeClientInfo(r, cliInfo)
 			}
 		}
 	}
 }
 
 // 已有的客户端登录
-func (s *Node) clientLogin(invoker *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
+func (s *Node) invokeClientLogin(invoker *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
 	cliInfo := &app.ClientSession{ClientInvoker: invoker}
 	utils.GetJsonValue(cliInfo, r.BodyJson)
 	if !s.checkClientLogin(cliInfo, false) {
@@ -571,12 +486,12 @@ func (s *Node) clientLogin(invoker *network.Invoker, r *network.InvokeRequest) *
 	}
 	cliInfo.NodeId = s.TerminalId
 	cliInfo.ClientIP = invoker.ConnIP()
-	re := s.updateClients(r, cliInfo)
+	re := s.updateinvokeClientInfo(r, cliInfo)
 	return re
 }
 
 // 更新客户端连接信息
-func (s *Node) updateClients(r *network.InvokeRequest, cliInfo *app.ClientSession) *network.InvokeResponse {
+func (s *Node) updateinvokeClientInfo(r *network.InvokeRequest, cliInfo *app.ClientSession) *network.InvokeResponse {
 	if v, ok := s.clientIdMaps.Load(cliInfo.TerminalId); ok {
 		curConnectionId := cliInfo.ConnectionId
 		oldConnectionId := v.(string)
@@ -606,7 +521,7 @@ func (s *Node) updateClients(r *network.InvokeRequest, cliInfo *app.ClientSessio
 }
 
 // 接收客户端心跳，超过ClientTimeout没有客户端心跳，移除客户端
-func (s *Node) clientSayOnline(_ *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
+func (s *Node) invokeClientHeartbeat(_ *network.Invoker, r *network.InvokeRequest) *network.InvokeResponse {
 	cliInfo := &network.ClientConnInfo{}
 	utils.GetJsonValue(cliInfo, r.BodyJson)
 	if cliInfo.Type != network.TerminalType_Client {
@@ -617,7 +532,7 @@ func (s *Node) clientSayOnline(_ *network.Invoker, r *network.InvokeRequest) *ne
 	clientInfo := &network.ClientConnInfo{}
 	if s.etcdOp.GetJsonValue(key, clientInfo) {
 		if clientInfo.Token == cliInfo.Token && clientInfo.ConnectionId == cliInfo.ConnectionId {
-			s.clients.SetExpire(clientInfo.ConnectionId, time.Second*time.Duration(s.ClientTimeOut))
+			go s.clients.SetExpire(clientInfo.ConnectionId, time.Second*time.Duration(s.ClientTimeOut))
 		}
 	}
 
@@ -638,12 +553,12 @@ func (s *Node) clientSayOnline(_ *network.Invoker, r *network.InvokeRequest) *ne
 //
 //}
 
-func (s *Node) onHttpTest(c echo.Context) error {
+func (s *Node) httpTest(c echo.Context) error {
 	c.JSON(200, utils.SuccessResponse())
 	return nil
 }
 
-func (s *Node) onHttpPortAdd(c echo.Context) error {
+func (s *Node) httpTransferAdd(c echo.Context) error {
 	transferMapReq := &network.TransferRequest{}
 	if err := c.Bind(transferMapReq); err != nil {
 		_ = c.JSON(200, utils.ErrResponse(err.Error()))
@@ -706,7 +621,7 @@ func (s *Node) onHttpPortAdd(c echo.Context) error {
 	}
 }
 
-func (s *Node) getClientTransferMapList(invoker *network.Invoker, request *network.InvokeRequest) *network.InvokeResponse {
+func (s *Node) invokeClientTransferList(invoker *network.Invoker, request *network.InvokeRequest) *network.InvokeResponse {
 	clientInfo := &network.ClientInfo{}
 	utils.GetJsonValue(clientInfo, request.BodyJson)
 	terminalId := clientInfo.TerminalId
@@ -794,31 +709,40 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 	listenCli := s.getClientByTerminalId(listenTerminalId)
 	targetCli := s.getClientByTunnelId(targetTunnelId)
 
-	go func() {
-		select {
-		case <-transfer.Ctx().Done():
-			return
-		default:
-			<-transfer.TransferChan()
-			if transNow {
-				transfer.Transfer()
+	if listenCli != nil && targetCli != nil {
+		go func() {
+			select {
+			case <-transfer.Ctx().Done():
+				return
+			default:
+				<-transfer.TransferChan()
+				if transNow {
+					transfer.Transfer()
+					_ = transfer.Close()
+					s.deleteTransfer(connId)
+				}
+			}
+		}()
+	}
+
+	var resp *network.InvokeResponse
+	var err error
+	if targetCli == nil {
+		log.Println("Target通道不在当前节点")
+		return
+	} else {
+		// 通知目标端，建立流量通道到服务器
+		req.Path = network.InvokePath_Transfer_Dial
+		resp, err = targetCli.ClientInvoker.Invoke(req)
+
+		if err != nil {
+			log.Println(err)
+			go func() {
 				_ = transfer.Close()
 				s.deleteTransfer(connId)
-			}
+			}()
+			return
 		}
-	}()
-
-	// 通知目标端，建立流量通道到服务器
-	req.Path = network.InvokePath_Transfer_Dial
-	resp, err := targetCli.ClientInvoker.Invoke(req)
-
-	if err != nil {
-		log.Println(err)
-		go func() {
-			_ = transfer.Close()
-			s.deleteTransfer(connId)
-		}()
-		return
 	}
 
 	// 目标端建立连接有可能会报错
