@@ -382,13 +382,12 @@ func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 	if session, err := s.transportServer.Upgrade(w, r); err != nil {
 		log.Println(err)
 	} else {
-		sessionCtx, sessionCancel := context.WithCancel(s.Ctx())
-		if stream, err := session.AcceptStream(sessionCtx); err != nil {
+		if stream, err := session.AcceptStream(s.Ctx()); err != nil {
 			if err.Error() != "" {
 				log.Println(err.Error())
 			}
 		} else {
-			invoker := s.invokeRoute.AddInvoker(connectionId, sessionCancel, session, stream)
+			invoker := s.invokeRoute.AddInvoker(connectionId, session, stream)
 			if isCmdTrans {
 				s.invokeRoute.DispatchInvoke(invoker, func(request *network.InvokeRequest) {
 					go s.clients.SetExpire(invoker.ConnId(), time.Second*15)
@@ -681,7 +680,7 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 		go func() {
 			// 通知监听道，开始接入流量
 			req.Path = network.InvokePath_Transfer_Go
-			err = targetCli.ClientInvoker.WriteInvoke(req)
+			err = listenCli.ClientInvoker.WriteInvoke(req)
 			if err != nil {
 				log.Println(err)
 				go func() {
