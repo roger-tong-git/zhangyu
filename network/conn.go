@@ -242,10 +242,7 @@ func (t *TransferStream) Transfer() {
 		errChan <- err
 	}()
 
-	err := <-errChan
-	if err != nil && err != io.EOF {
-		log.Println(err.Error())
-	}
+	<-errChan
 	_ = t.targetStream.Close()
 	_ = t.sourceStream.Close()
 }

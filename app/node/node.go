@@ -382,12 +382,13 @@ func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 	if session, err := s.transportServer.Upgrade(w, r); err != nil {
 		log.Println(err)
 	} else {
-		if stream, err := session.AcceptStream(context.Background()); err != nil {
+		sessionCtx, sessionCancel := context.WithCancel(s.Ctx())
+		if stream, err := session.AcceptStream(sessionCtx); err != nil {
 			if err.Error() != "" {
 				log.Println(err.Error())
 			}
 		} else {
-			invoker := s.invokeRoute.AddInvoker(connectionId, session, stream)
+			invoker := s.invokeRoute.AddInvoker(connectionId, sessionCancel, session, stream)
 			if isCmdTrans {
 				s.invokeRoute.DispatchInvoke(invoker, func(request *network.InvokeRequest) {
 					go s.clients.SetExpire(invoker.ConnId(), time.Second*15)
@@ -694,7 +695,6 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 }
 
 func (s *Node) invokeHeartbeat(invoker *network.Invoker, request *network.InvokeRequest) {
-	log.Println("ConnId[", invoker.ConnId(), "] Heartbeat")
 	s.clients.SetExpire(invoker.ConnId(), time.Second*15)
 }
 

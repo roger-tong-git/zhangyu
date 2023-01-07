@@ -69,6 +69,7 @@ func NewInvokeResponse(requestId string, resultCode InvokeResultCode, resultMess
 type Invoker struct {
 	connIP        string
 	connId        string
+	sessionCancel func()
 	transportConn *WebtransportConn
 	writerLock    *sync.Mutex
 	readerLock    *sync.Mutex
@@ -319,16 +320,19 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker, HeartbeatHandler func(*In
 	}
 }
 
-func (r *InvokeRoute) AddInvoker(connId string, session *webtransport.Session, stream webtransport.Stream) *Invoker {
+func (r *InvokeRoute) AddInvoker(connId string, sessionCancel func(), session *webtransport.Session, stream webtransport.Stream) *Invoker {
 	defer r.invokerLock.Unlock()
 	r.invokerLock.Lock()
 	invoker := &Invoker{
 		connIP:        session.RemoteAddr().String(),
+		sessionCancel: sessionCancel,
 		connId:        connId,
 		transportConn: NewWebtransportConn(session, stream),
 		invokeMap:     map[string]chan *InvokeResponse{}}
 	invoker.SetCtx(r.Ctx())
 	invoker.SetOnClose(func() {
+		sessionCancel()
+		_ = session.CloseWithError(0, "")
 		if invoker.transportConn != nil {
 			_ = invoker.transportConn.Close()
 		}

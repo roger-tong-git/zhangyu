@@ -83,7 +83,8 @@ func (w *TransportClient) Dial(addr string, connId string, connType string, conn
 	d.RoundTripper = &http3.RoundTripper{}
 	d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
-	if _, session, err = d.Dial(w.Ctx(), addr, header); err != nil {
+	sessionCtx, sessionCancel := context.WithCancel(w.Ctx())
+	if _, session, err = d.Dial(sessionCtx, addr, header); err != nil {
 		return err
 	}
 
@@ -92,7 +93,7 @@ func (w *TransportClient) Dial(addr string, connId string, connType string, conn
 	} else {
 		w.connected = true
 		w.lastAddr = addr
-		invoker := w.invokeRoute.AddInvoker(connId, session, stream)
+		invoker := w.invokeRoute.AddInvoker(connId, sessionCancel, session, stream)
 		if connectedHandler != nil {
 			connectedHandler(invoker)
 		}
