@@ -268,7 +268,6 @@ func (w *TransportClient) connectTarget(connId string, tq *TransferRequest) erro
 		log.Println(fmt.Sprintf("被控通道连接到目标服务[%v]失败", sourceUrl.Host))
 		return listenErr
 	}
-	log.Println("transfer连接建立:", connId)
 
 	return w.Dial(w.lastAddr, connId, Connection_Instance_Target, func(invoker *Invoker) {
 		// 此处写入1个前置字节，只是为了推动流在服务端能够AcceptStream
