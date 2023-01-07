@@ -7,3 +7,4 @@ cmd/node/node.json
 cmd/node/node.key
 cmd/node/node.pem
 front.json
+cmd/client/client

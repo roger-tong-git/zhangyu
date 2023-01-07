@@ -67,15 +67,24 @@ func NewInvokeResponse(requestId string, resultCode InvokeResultCode, resultMess
 }
 
 type Invoker struct {
-	connIP        string
-	connId        string
-	transportConn *WebtransportConn
-	writerLock    *sync.Mutex
-	readerLock    *sync.Mutex
-	route         *InvokeRoute
-	invokeMap     map[string]chan *InvokeResponse
-	invokeMapLock sync.Mutex
+	connIP            string
+	connId            string
+	transportConn     *WebtransportConn
+	writerLock        *sync.Mutex
+	readerLock        *sync.Mutex
+	route             *InvokeRoute
+	invokeMap         map[string]chan *InvokeResponse
+	invokeMapLock     sync.Mutex
+	writeErrorHandler func(err error)
 	utils.Closer
+}
+
+func (s *Invoker) WriteErrorHandler() func(err error) {
+	return s.writeErrorHandler
+}
+
+func (s *Invoker) SetWriteErrorHandler(writeErrorHandler func(err error)) {
+	s.writeErrorHandler = writeErrorHandler
 }
 
 func (s *Invoker) WriterLock() *sync.Mutex {
@@ -174,7 +183,11 @@ func (s *Invoker) receiveResponse(resp *InvokeResponse) {
 
 // ReadInvoke 从io.reader中读取数据，数据只可能是InvokeRequest/InvokeResponse/error
 func (s *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
-	return ReadInvoke(s.ReaderLock(), s)
+	req, resp, err := ReadInvoke(s.ReaderLock(), s)
+	if err != nil && s.writeErrorHandler != nil {
+		s.writeErrorHandler(err)
+	}
+	return req, resp, err
 }
 
 // WriteInvoke 写入数据到 io.writer中，写入的数据只可能是 InvokeRequest/InvokeResponse
@@ -183,7 +196,11 @@ func (s *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
 // 数据体字节流长度-Int64
 // 数据体字节流 参数r转化为json字符串后取字节流
 func (s *Invoker) WriteInvoke(r any) error {
-	return WriteInvoke(s.WriterLock(), s, r)
+	re := WriteInvoke(s.WriterLock(), s, r)
+	if re != nil && s.writeErrorHandler != nil {
+		s.writeErrorHandler(re)
+	}
+	return re
 }
 
 func (s *Invoker) Invoke(r *InvokeRequest) (*InvokeResponse, error) {

@@ -110,7 +110,7 @@ func (w *TransportClient) heartbeat() {
 				continue
 			}
 			req := NewInvokeRequest(w.clientInfo.TerminalId, InvokePath_Client_Heartbeat)
-			_ = WriteInvoke(w.DefaultInvoker().WriterLock(), w.DefaultInvoker(), req)
+			_ = w.DefaultInvoker().WriteInvoke(req)
 		}
 	}
 }
@@ -118,6 +118,9 @@ func (w *TransportClient) heartbeat() {
 func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 	_ = w.Dial(addr, w.clientInfo.ConnectionId, Connection_Command, func(invoker *Invoker) {
 		w.invokeRoute.SetDefaultInvoker(invoker)
+		invoker.SetWriteErrorHandler(func(_ error) {
+			w.connected = false
+		})
 		go w.invokeRoute.DispatchInvoke(invoker, nil)
 		if connectedHandler != nil {
 			connectedHandler()

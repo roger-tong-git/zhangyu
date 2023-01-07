@@ -3,11 +3,11 @@ module github.com/roger-tong-git/zhangyu
 go 1.19
 
 require (
-	github.com/adriancable/webtransport-go v0.1.0
 	github.com/google/uuid v1.3.0
 	github.com/labstack/echo/v4 v4.9.1
 	github.com/lucas-clemente/quic-go v0.31.1
 	github.com/marten-seemann/webtransport-go v0.4.2
+	github.com/reiver/go-telnet v0.0.0-20180421082511-9ff0b2ab096e
 	go.etcd.io/etcd/api/v3 v3.5.6
 	go.etcd.io/etcd/client/v3 v3.5.6
 	go.uber.org/zap v1.17.0
@@ -28,6 +28,7 @@ require (
 	github.com/mattn/go-colorable v0.1.11 // indirect
 	github.com/mattn/go-isatty v0.0.16 // indirect
 	github.com/onsi/ginkgo/v2 v2.2.0 // indirect
+	github.com/reiver/go-oi v1.0.0 // indirect
 	github.com/stretchr/testify v1.8.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.1 // indirect

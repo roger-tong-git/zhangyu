@@ -29,7 +29,7 @@ const (
 	HeadKey_ConnectionId       = "Zhangyu-ConnectionId"
 	HeadKey_ConnectionType     = "Zhangyu-ConnectionType" //连接类型
 	HeadKey_Domain             = "Zhangyu-Domain"
-	WebSocket_ServicePath      = "/_zhangyu/websocket"
+	WebSocket_ServicePath      = "/_zhangyu/transport"
 	Connection_Command         = "Command"       //命令连接
 	Connection_Instance_From   = "Instance_From" //流量连接
 	Connection_Instance_Target = "Instance_Target"

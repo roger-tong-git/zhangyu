@@ -335,7 +335,7 @@ func (s *Node) initQuic() {
 	h3 := &http3.Server{
 		Addr:      addr,
 		TLSConfig: tlsConfig,
-		Handler:   s.httpMux,
+		Handler:   s,
 	}
 
 	//在Http3的基础上，升级成WebTransport服务
@@ -381,7 +381,7 @@ func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 				})
 			} else {
 				if isTransferListen {
-					req, _, err := network.ReadInvoke(invoker.ReaderLock(), invoker)
+					req, _, err := invoker.ReadInvoke()
 					if err != nil {
 						log.Println(err)
 						_ = invoker.Close()
@@ -535,7 +535,7 @@ func (s *Node) httpTransferAdd(c echo.Context) error {
 		return err
 	}
 
-	invokeReq := network.NewInvokeRequest(uuid.New().String(), c.Request().RequestURI)
+	invokeReq := network.NewInvokeRequest(uuid.New().String(), network.InvokePath_Transfer_Listen)
 	invokeReq.BodyJson = utils.GetJsonString(transferMapReq)
 
 	uri, _ := url.Parse(transferMapReq.ListenTerminalUri)
