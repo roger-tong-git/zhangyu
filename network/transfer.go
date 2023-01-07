@@ -39,12 +39,7 @@ func NewTransferSession(connId string, sourceStream SessionReadWriter) *Transfer
 	re.TransferStream = *NewTransferStream(connId, sourceStream, nil)
 	re.SetCtx(sourceStream.Ctx())
 	re.SetOnClose(func() {
-		if s := re.SourceStream(); s != nil {
-			_ = s.Close()
-		}
-		if d := re.TargetStream(); d != nil {
-			_ = d.Close()
-		}
+		re.CloseStream()
 	})
 	return re
 }
@@ -54,12 +49,7 @@ func NewTransferSessionWithValue(ctx context.Context, connId string) *TransferSe
 	re.TransferStream = *NewTransferStream(connId, nil, nil)
 	re.SetCtx(ctx)
 	re.SetOnClose(func() {
-		if s := re.SourceStream(); s != nil {
-			_ = s.Close()
-		}
-		if d := re.TargetStream(); d != nil {
-			_ = d.Close()
-		}
+		re.CloseStream()
 	})
 	return re
 }

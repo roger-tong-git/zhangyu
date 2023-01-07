@@ -10,7 +10,6 @@ import (
 )
 
 func main() {
-	log.SetFlags(log.Lshortfile | log.LstdFlags)
 	ctx := context.Background()
 	sClient := client.NewClient(ctx)
 	defer sClient.Close()

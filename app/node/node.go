@@ -125,22 +125,6 @@ func (s *Node) onClientExpire(_ string, value any) {
 	}
 }
 
-func (s *Node) closeTransfer(session *network.TransferSession) {
-	if tunnelId := session.TargetTunnelId(); tunnelId != "" {
-		if cli := s.getClientByTunnelId(tunnelId); cli != nil {
-			_ = cli.ClientInvoker.WriteInvoke(network.NewInvokeRequest(tunnelId, network.InvokePath_Transfer_Disconnect))
-		}
-	}
-	if session.TargetStream() != nil {
-		_ = session.TargetStream().Close()
-	}
-	if session.SourceStream() != nil {
-		_ = session.SourceStream().Close()
-	}
-	_ = session.Close()
-	s.deleteTransfer(session.TransferId())
-}
-
 func NewNode(ctx context.Context) *Node {
 	rand2.Intn(time.Now().Nanosecond())
 	node := &Node{}
@@ -154,7 +138,12 @@ func NewNode(ctx context.Context) *Node {
 	node.transfers = utils.NewCache[*network.TransferSession](node.Ctx())
 	node.transfers.SetExpireHandler(func(key string, value any) {
 		if v, ok := value.(*network.TransferSession); ok {
-			node.closeTransfer(v)
+			if tunnelId := v.TargetTunnelId(); tunnelId != "" {
+				if cli := node.getClientByTunnelId(tunnelId); cli != nil {
+					_ = cli.ClientInvoker.WriteInvoke(network.NewInvokeRequest(tunnelId, network.InvokePath_Transfer_Disconnect))
+				}
+			}
+			_ = v.Close()
 		}
 	})
 
@@ -249,7 +238,8 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					transfer.SetTargetTunnelId(tq.TargetTerminalTunnelId)
 					rawTransfer := transfer
 					transfer.SetOnClose(func() {
-						s.closeTransfer(rawTransfer)
+						rawTransfer.CloseStream()
+						s.deleteTransfer(httpConnId)
 					})
 					s.setTransfer(httpConnId, transfer)
 					req := network.NewInvokeRequest(uuid.New().String(), network.InvokePath_Transfer_Dial)
@@ -259,6 +249,7 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					go func() {
 						s.transfer(req, false)
 					}()
+
 					select {
 					case <-transfer.TransferChan():
 						if targetStream := transfer.TargetStream(); targetStream != nil {
@@ -268,44 +259,39 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						}
 					case <-time.After(time.Second * 10):
 						_ = transfer.Close()
+						s.deleteTransfer(httpConnId)
 					}
 				}
 
 				transfer = s.getTransfer(httpConnId)
 				if transfer == nil {
-					http.Error(w, "无法建立到目标通道的连接", http.StatusInternalServerError)
+					http.Error(w, "建立目标连接失败", http.StatusInternalServerError)
 					return
 				}
 
 				s.transfers.SetExpire(httpConnId, time.Second*5)
-				if transport := transfer.Transport(); transport != nil {
-					outReq := &http.Request{}
-					*outReq = *r
-					outReq.Host = targetUri.Host
-					outReq.URL.Host = targetUri.Host
-					outReq.URL.Scheme = targetUri.Scheme
 
-					if resp, err := transfer.Transport().RoundTrip(outReq); err == nil {
-						for k, v := range resp.Header {
-							value := strings.Join(v, ";")
-							w.Header().Set(k, value)
-						}
-						w.WriteHeader(resp.StatusCode)
-						_, err := io.Copy(w, resp.Body)
-						if err != io.EOF {
-							_ = transfer.Close()
-						}
-						return
-					} else {
-						_ = transfer.Close()
-						http.Error(w, "无法建立到目标通道的连接", http.StatusInternalServerError)
+				outReq := &http.Request{}
+				*outReq = *r
+				outReq.Host = targetUri.Host
+				outReq.URL.Host = targetUri.Host
+				outReq.URL.Scheme = targetUri.Scheme
+
+				if resp, err := transfer.Transport().RoundTrip(outReq); err == nil {
+					for k, v := range resp.Header {
+						value := strings.Join(v, ";")
+						w.Header().Set(k, value)
 					}
+					w.WriteHeader(resp.StatusCode)
+					bytes, _ := io.ReadAll(resp.Body)
+					_ = utils.WriteBytes(w, bytes)
+					return
 				} else {
-					http.Error(w, "无法建立到目标通道的连接", http.StatusInternalServerError)
+					_ = transfer.Close()
+					http.Error(w, err.Error(), http.StatusInternalServerError)
 				}
 			} else {
-				log.Println("客户端连接配置不存在:", httpKey)
-				http.Error(w, "无法建立到目标通道的连接", http.StatusInternalServerError)
+				http.Error(w, "建立目标连接失败", http.StatusInternalServerError)
 			}
 		} else {
 			s.httpMux.ServeHTTP(w, r)
@@ -379,10 +365,11 @@ func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 	isTransferListen := r.Header.Get(network.HeadKey_ConnectionType) == network.Connection_Instance_From
 	isTransferTarget := r.Header.Get(network.HeadKey_ConnectionType) == network.Connection_Instance_Target
 
+	//session.AcceptSession()
 	if session, err := s.transportServer.Upgrade(w, r); err != nil {
 		log.Println(err)
 	} else {
-		if stream, err := session.AcceptStream(s.Ctx()); err != nil {
+		if stream, err := session.AcceptStream(context.Background()); err != nil {
 			if err.Error() != "" {
 				log.Println(err.Error())
 			}
@@ -400,9 +387,6 @@ func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 						_ = invoker.Close()
 					}
 					transfer := network.NewTransferSession(connectionId, invoker)
-					transfer.SetOnClose(func() {
-						s.closeTransfer(transfer)
-					})
 					s.setTransfer(connectionId, transfer)
 					go s.transfer(req, true)
 				}
@@ -643,7 +627,7 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 	listenCli := s.getClientByTerminalId(listenTerminalId)
 	targetCli := s.getClientByTunnelId(targetTunnelId)
 
-	if transfer.TargetStream() != nil && transfer.SourceStream() != nil {
+	if listenCli != nil && targetCli != nil {
 		go func() {
 			select {
 			case <-transfer.Ctx().Done():
@@ -653,6 +637,7 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 				if transNow {
 					transfer.Transfer()
 					_ = transfer.Close()
+					s.deleteTransfer(connId)
 				}
 			}
 		}()
@@ -660,7 +645,7 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 
 	var err error
 	if targetCli == nil {
-		_ = transfer.Close()
+		log.Println("Target通道不在当前节点")
 		return
 	} else {
 		// 通知目标端，建立流量通道到服务器
@@ -671,6 +656,7 @@ func (s *Node) transfer(req *network.InvokeRequest, transNow bool) {
 			log.Println(err)
 			go func() {
 				_ = transfer.Close()
+				s.deleteTransfer(connId)
 			}()
 			return
 		}
@@ -698,8 +684,6 @@ func (s *Node) invokeHeartbeat(invoker *network.Invoker, request *network.Invoke
 }
 
 func (s *Node) invokeDisconnect(invoker *network.Invoker, request *network.InvokeRequest) {
-	log.Println("Transfer disconn:", request.RequestId)
-
 	transfer := s.getTransfer(request.RequestId)
 	if transfer != nil {
 		_ = transfer.Close()

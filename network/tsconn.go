@@ -214,19 +214,20 @@ func (w *TransportClient) AppendTransferListen(tq *TransferRequest) error {
 
 							transferStream := NewTransferSession(connId, invoker)
 							transferStream.SetTargetStream(conn)
+							transferStream.SetOnClose(func() {
+								transferStream.CloseStream()
+								w.deleteTransfer(connId)
+							})
 							w.setTransfer(connId, transferStream)
 
 							go func() {
 								select {
 								case <-transferStream.Ctx().Done():
-									log.Println("Delete ConnId(Done):", connId)
 									break
 								default:
 									transferStream.Transfer()
-									log.Println("Delete ConnId:", connId)
 								}
 								_ = transferStream.Close()
-								w.deleteTransfer(connId)
 								_ = w.DefaultInvoker().WriteInvoke(NewInvokeRequest(connId, InvokePath_Transfer_Disconnect))
 							}()
 						})
@@ -304,7 +305,6 @@ func (w *TransportClient) onTransferDisconnect(invoker *Invoker, request *Invoke
 	transfer := w.getTransfer(request.RequestId)
 	if transfer != nil {
 		_ = transfer.Close()
-		w.deleteTransfer(request.RequestId)
 	}
 }
 

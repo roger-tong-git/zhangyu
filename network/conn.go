@@ -199,6 +199,15 @@ type TransferStream struct {
 	targetStream ReadWriter
 }
 
+func (t *TransferStream) CloseStream() {
+	if s := t.SourceStream(); s != nil {
+		_ = s.Close()
+	}
+	if d := t.TargetStream(); d != nil {
+		_ = d.Close()
+	}
+}
+
 func (t *TransferStream) SetTargetStream(targetStream ReadWriter) {
 	t.targetStream = targetStream
 }
@@ -230,7 +239,7 @@ func (t *TransferStream) Transfer() {
 		return
 	}
 
-	errChan := make(chan error)
+	errChan := make(chan error, 2)
 
 	go func() {
 		_, err := io.Copy(t.sourceStream, t.targetStream)
@@ -242,33 +251,16 @@ func (t *TransferStream) Transfer() {
 		errChan <- err
 	}()
 
-	<-errChan
-	_ = t.targetStream.Close()
-	_ = t.sourceStream.Close()
-}
-
-func readString(mutex *sync.Mutex, reader io.Reader) (string, error) {
-	defer mutex.Unlock()
-	mutex.Lock()
-	return bufio.NewReader(reader).ReadString('\n')
-}
-
-func writeString(mutex *sync.Mutex, write io.Writer, str string) error {
-	defer mutex.Unlock()
-	mutex.Lock()
-
-	sWriter := bufio.NewWriter(write)
-	_, err := sWriter.WriteString(str)
-	if err != nil {
-		return err
-	}
-	err = sWriter.Flush()
-	return err
+	_ = <-errChan
+	t.CloseStream()
 }
 
 // ReadInvoke 从io.reader中读取数据，数据只可能是InvokeRequest/InvokeResponse/error
 func ReadInvoke(mutex *sync.Mutex, reader io.Reader) (*InvokeRequest, *InvokeResponse, error) {
-	str, err := readString(mutex, reader)
+	defer mutex.Unlock()
+	mutex.Lock()
+
+	str, err := bufio.NewReader(reader).ReadString('\n')
 	if err != nil {
 		return nil, nil, err
 	}
@@ -306,6 +298,9 @@ func ReadInvoke(mutex *sync.Mutex, reader io.Reader) (*InvokeRequest, *InvokeRes
 
 */
 func WriteInvoke(mutex *sync.Mutex, write io.Writer, r any) error {
+	defer mutex.Unlock()
+	mutex.Lock()
+
 	v := make(map[string]any)
 	invType := "1"
 	if _, ok := r.(*InvokeRequest); ok {
@@ -318,6 +313,12 @@ func WriteInvoke(mutex *sync.Mutex, write io.Writer, r any) error {
 	v["type"] = invType
 	v["data"] = utils.GetJsonString(r)
 	writeBytes := utils.GetJsonBytes(v)
-	enStr := base64.StdEncoding.EncodeToString(writeBytes) + "\n"
-	return writeString(mutex, write, enStr)
+	sWriter := bufio.NewWriter(write)
+	enStr := base64.StdEncoding.EncodeToString(writeBytes)
+	_, err := sWriter.WriteString(enStr + "\n")
+	if err != nil {
+		return err
+	}
+	err = sWriter.Flush()
+	return err
 }
