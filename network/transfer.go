@@ -7,10 +7,19 @@ import (
 )
 
 type TransferSession struct {
-	transferChan chan bool
-	transport    *http.Transport
+	targetTunnelId string
+	transferChan   chan bool
+	transport      *http.Transport
 	TransferStream
 	utils.Closer
+}
+
+func (t *TransferSession) TargetTunnelId() string {
+	return t.targetTunnelId
+}
+
+func (t *TransferSession) SetTargetTunnelId(targetTunnelId string) {
+	t.targetTunnelId = targetTunnelId
 }
 
 func (t *TransferSession) Transport() *http.Transport {

@@ -138,9 +138,13 @@ func NewNode(ctx context.Context) *Node {
 	node.transfers = utils.NewCache[*network.TransferSession](node.Ctx())
 	node.transfers.SetExpireHandler(func(key string, value any) {
 		if v, ok := value.(*network.TransferSession); ok {
+			if tunnelId := v.TargetTunnelId(); tunnelId != "" {
+				if cli := node.getClientByTunnelId(tunnelId); cli != nil {
+					_ = cli.ClientInvoker.WriteInvoke(network.NewInvokeRequest(tunnelId, network.InvokePath_Transfer_Disconnect))
+					log.Println("通知客户端流量连接断开:")
+				}
+			}
 			_ = v.Close()
-			go node.transfers.Delete(key)
-			log.Println("Delete Transfer:", key)
 		}
 	})
 
@@ -232,6 +236,11 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				transfer := s.getTransfer(httpConnId)
 				if transfer == nil {
 					transfer = network.NewTransferSessionWithValue(s.Ctx(), httpConnId)
+					transfer.SetTargetTunnelId(tq.TargetTerminalTunnelId)
+					transfer.SetOnClose(func() {
+
+						s.deleteTransfer(httpConnId)
+					})
 					s.setTransfer(httpConnId, transfer)
 					req := network.NewInvokeRequest(uuid.New().String(), network.InvokePath_Transfer_Dial)
 					req.Header[network.HeadKey_ConnectionId] = httpConnId
@@ -247,6 +256,8 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+
+				s.transfers.SetExpire(httpConnId, time.Second*5)
 
 				if transport := transfer.Transport(); transport != nil {
 					outReq := &http.Request{}
@@ -264,8 +275,17 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						bytes, _ := io.ReadAll(resp.Body)
 						_ = utils.WriteBytes(w, bytes)
 						return
+					} else {
+						//if cli := s.getClientByTunnelId(tq.TargetTerminalTunnelId); cli != nil {
+						//	_ = cli.ClientInvoker.WriteInvoke(network.NewInvokeRequest(httpConnId, network.InvokePath_Transfer_Disconnect))
+						//}
+						_ = transfer.Close()
+						s.deleteTransfer(httpConnId)
+						log.Println("HttpResponse Error:", err.Error())
 					}
 				}
+			} else {
+				log.Println("客户端连接配置不存在:", httpKey)
 			}
 		} else {
 			s.httpMux.ServeHTTP(w, r)

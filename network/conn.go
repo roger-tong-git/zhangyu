@@ -1,7 +1,9 @@
 package network
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/marten-seemann/webtransport-go"
@@ -93,8 +95,8 @@ type ReadWriter interface {
 
 type SessionReadWriter interface {
 	ReadWriter
-	WriterLock() sync.Mutex
-	ReaderLock() sync.Mutex
+	WriterLock() *sync.Mutex
+	ReaderLock() *sync.Mutex
 	Close() error
 	Ctx() context.Context
 }
@@ -240,81 +242,78 @@ func (t *TransferStream) Transfer() {
 		errChan <- err
 	}()
 
-	<-errChan
+	err := <-errChan
+	if err != nil && err != io.EOF {
+		log.Println(err.Error())
+	}
 	_ = t.targetStream.Close()
 	_ = t.sourceStream.Close()
 }
 
 // ReadInvoke 从io.reader中读取数据，数据只可能是InvokeRequest/InvokeResponse/error
-func ReadInvoke(mutex sync.Mutex, reader io.Reader) (*InvokeRequest, *InvokeResponse, error) {
+func ReadInvoke(mutex *sync.Mutex, reader io.Reader) (*InvokeRequest, *InvokeResponse, error) {
 	defer mutex.Unlock()
 	mutex.Lock()
 
-	readTypeBytes, err := utils.ReadBytes(reader, 1)
+	str, err := bufio.NewReader(reader).ReadString('\n')
 	if err != nil {
 		return nil, nil, err
 	}
 
-	readType := (*readTypeBytes)[0]
-	if readType != byte(1) && readType != byte(2) {
-		return nil, nil, errors.New(fmt.Sprintf("读取到的invoke类型无效：%v", readType))
-	}
-
-	readSizeBytes, err := utils.ReadBytes(reader, 8)
-	if err != nil {
-		return nil, nil, err
-	}
-	var readBytes *[]byte
-	readSize := utils.ByteArrayToInt(*readSizeBytes)
-	if readBytes, err = utils.ReadBytes(reader, int(readSize)); err != nil {
-		return nil, nil, err
+	if bytes, deErr := base64.StdEncoding.DecodeString(str); deErr != nil {
+		log.Println("base64解码失败")
+		return nil, nil, deErr
 	} else {
-		jsonValue := string(*readBytes)
-		if readType == byte(1) {
-			req := &InvokeRequest{}
-			utils.GetJsonValue(req, jsonValue)
-			return req, nil, nil
-		} else {
-			resp := &InvokeResponse{}
-			utils.GetJsonValue(resp, jsonValue)
-			return nil, resp, nil
-		}
+		str = string(bytes)
+	}
+
+	v := &map[string]any{}
+	utils.GetJsonValue(v, str)
+	invType := (*v)["type"].(string)
+	if invType != "1" && invType != "2" {
+		return nil, nil, errors.New(fmt.Sprintf("读取到的invoke类型无效：%v", invType))
+	}
+	data := (*v)["data"].(string)
+	if invType == "1" {
+		invReq := &InvokeRequest{}
+		utils.GetJsonValue(invReq, data)
+		return invReq, nil, nil
+	} else {
+		invResp := &InvokeResponse{}
+		utils.GetJsonValue(invResp, data)
+		return nil, invResp, nil
 	}
 }
 
 // WriteInvoke 写入数据到 io.writer中，写入的数据只可能是 InvokeRequest/InvokeResponse
-// 写入的格式为:
-// 类型-byte InvokeRequest-1 / InvokeResponse-2
-// 数据体字节流长度-Int64
-// 数据体字节流 参数r转化为json字符串后取字节流
-func WriteInvoke(mutex sync.Mutex, write io.Writer, r any) error {
+/* 写入的方式为:
+	1. 建立一个字典
+       data : 1-InvokeRequest, 2-InvokeResponse
+
+
+*/
+func WriteInvoke(mutex *sync.Mutex, write io.Writer, r any) error {
 	defer mutex.Unlock()
 	mutex.Lock()
 
-	invokeTypeByte := make([]byte, 1)
+	v := make(map[string]any)
+	invType := "1"
 	if _, ok := r.(*InvokeRequest); ok {
-		invokeTypeByte[0] = 1
+		invType = "1"
 	} else if _, ok = r.(*InvokeResponse); ok {
-		invokeTypeByte[0] = 2
+		invType = "2"
 	} else {
 		return errors.New("写入的值必须是* InvokeRequest/InvokeResponse 类型")
 	}
-
-	err := utils.WriteBytes(write, invokeTypeByte)
+	v["type"] = invType
+	v["data"] = utils.GetJsonString(r)
+	writeBytes := utils.GetJsonBytes(v)
+	sWriter := bufio.NewWriter(write)
+	enStr := base64.StdEncoding.EncodeToString(writeBytes)
+	_, err := sWriter.WriteString(enStr + "\n")
 	if err != nil {
 		return err
 	}
-
-	jsonValue := []byte(utils.GetJsonString(r))
-	writeLen := uint32(len(jsonValue))
-	writeLenBytes := utils.IntToByteArray(int64(writeLen))
-	err = utils.WriteBytes(write, writeLenBytes)
-	if err != nil {
-		return err
-	}
-	err = utils.WriteBytes(write, jsonValue)
-	if err != nil {
-		return err
-	}
-	return nil
+	err = sWriter.Flush()
+	return err
 }

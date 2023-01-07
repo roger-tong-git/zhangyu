@@ -70,19 +70,25 @@ type Invoker struct {
 	connIP        string
 	connId        string
 	transportConn *WebtransportConn
-	writerLock    sync.Mutex
-	readerLock    sync.Mutex
+	writerLock    *sync.Mutex
+	readerLock    *sync.Mutex
 	route         *InvokeRoute
 	invokeMap     map[string]chan *InvokeResponse
 	invokeMapLock sync.Mutex
 	utils.Closer
 }
 
-func (s *Invoker) WriterLock() sync.Mutex {
+func (s *Invoker) WriterLock() *sync.Mutex {
+	if s.writerLock == nil {
+		s.writerLock = &sync.Mutex{}
+	}
 	return s.writerLock
 }
 
-func (s *Invoker) ReaderLock() sync.Mutex {
+func (s *Invoker) ReaderLock() *sync.Mutex {
+	if s.readerLock == nil {
+		s.readerLock = &sync.Mutex{}
+	}
 	return s.readerLock
 }
 
@@ -168,7 +174,7 @@ func (s *Invoker) receiveResponse(resp *InvokeResponse) {
 
 // ReadInvoke 从io.reader中读取数据，数据只可能是InvokeRequest/InvokeResponse/error
 func (s *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
-	return ReadInvoke(s.readerLock, s)
+	return ReadInvoke(s.ReaderLock(), s)
 }
 
 // WriteInvoke 写入数据到 io.writer中，写入的数据只可能是 InvokeRequest/InvokeResponse
@@ -177,7 +183,7 @@ func (s *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
 // 数据体字节流长度-Int64
 // 数据体字节流 参数r转化为json字符串后取字节流
 func (s *Invoker) WriteInvoke(r any) error {
-	return WriteInvoke(s.writerLock, s, r)
+	return WriteInvoke(s.WriterLock(), s, r)
 }
 
 func (s *Invoker) Invoke(r *InvokeRequest) (*InvokeResponse, error) {
@@ -309,6 +315,7 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker, HeartbeatHandler func(*In
 				continue
 			}
 		}
+		time.Sleep(time.Millisecond * 100)
 	}
 }
 

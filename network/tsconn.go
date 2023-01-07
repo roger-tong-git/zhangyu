@@ -38,7 +38,7 @@ func (w *TransportClient) deleteTransfer(key string) {
 	w.transferLock.Lock()
 	delete(w.transfers, key)
 	log.Println("transfer连接删除:", key)
-	_ = w.DefaultInvoker().WriteInvoke(NewInvokeRequest(key, InvokePath_Transfer_Disconnect))
+
 }
 
 func (w *TransportClient) setTransfer(key string, value *TransferSession) {
@@ -153,6 +153,7 @@ func (w *TransportClient) initEvents() {
 	w.invokeRoute.AddRpcHandler(InvokePath_Transfer_Listen, w.onTransferListen) //收到添加转发通道的命令
 	w.invokeRoute.AddUniHandler(InvokePath_Transfer_Dial, w.onTransferConnDial)
 	w.invokeRoute.AddUniHandler(InvokePath_Transfer_Go, w.onTransferGo)
+	w.invokeRoute.AddUniHandler(InvokePath_Transfer_Disconnect, w.onTransferDisconnect)
 }
 
 func (w *TransportClient) onKick(invoker *Invoker, request *InvokeRequest) *InvokeResponse {
@@ -220,14 +221,14 @@ func (w *TransportClient) AppendTransferListen(tq *TransferRequest) error {
 							go func() {
 								select {
 								case <-transferStream.Ctx().Done():
-									w.deleteTransfer(connId)
 									log.Println("Delete ConnId(Done):", connId)
 									return
 								default:
 									transferStream.Transfer()
-									w.deleteTransfer(connId)
 									log.Println("Delete ConnId:", connId)
 								}
+								w.deleteTransfer(connId)
+								_ = w.DefaultInvoker().WriteInvoke(NewInvokeRequest(connId, InvokePath_Transfer_Disconnect))
 							}()
 						})
 					}()
@@ -267,6 +268,7 @@ func (w *TransportClient) connectTarget(connId string, tq *TransferRequest) erro
 		log.Println(fmt.Sprintf("被控通道连接到目标服务[%v]失败", sourceUrl.Host))
 		return listenErr
 	}
+	log.Println("transfer连接建立:", connId)
 
 	return w.Dial(w.lastAddr, connId, Connection_Instance_Target, func(invoker *Invoker) {
 		// 此处写入1个前置字节，只是为了推动流在服务端能够AcceptStream
@@ -288,7 +290,6 @@ func (w *TransportClient) onTransferConnDial(_ *Invoker, r *InvokeRequest) {
 			transferMapReq.TargetTerminalTunnelId, transferMapReq.TargetTerminalUri, err.Error()))
 	}
 
-	log.Println("transfer连接建立:", connId)
 }
 
 func (w *TransportClient) onTransferGo(invoker *Invoker, r *InvokeRequest) {
@@ -298,6 +299,15 @@ func (w *TransportClient) onTransferGo(invoker *Invoker, r *InvokeRequest) {
 		transfer.TransferChan() <- true
 	} else {
 		log.Println("Transfer连接丢失:", connId)
+	}
+}
+
+func (w *TransportClient) onTransferDisconnect(invoker *Invoker, request *InvokeRequest) {
+	transfer := w.getTransfer(request.RequestId)
+	if transfer != nil {
+		_ = transfer.Close()
+		w.deleteTransfer(request.RequestId)
+		log.Println("onTransferDisconnect:", request.RequestId)
 	}
 }
 
