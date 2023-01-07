@@ -37,8 +37,6 @@ func (w *TransportClient) deleteTransfer(key string) {
 	defer w.transferLock.Unlock()
 	w.transferLock.Lock()
 	delete(w.transfers, key)
-	log.Println("transfer连接删除:", key)
-
 }
 
 func (w *TransportClient) setTransfer(key string, value *TransferSession) {
@@ -130,7 +128,7 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 		if w.keepaliveRun {
 			return
 		}
-		//go w.heartbeat()
+		go w.heartbeat()
 		w.keepaliveRun = true
 		for {
 			select {
@@ -222,11 +220,12 @@ func (w *TransportClient) AppendTransferListen(tq *TransferRequest) error {
 								select {
 								case <-transferStream.Ctx().Done():
 									log.Println("Delete ConnId(Done):", connId)
-									return
+									break
 								default:
 									transferStream.Transfer()
 									log.Println("Delete ConnId:", connId)
 								}
+								_ = transferStream.Close()
 								w.deleteTransfer(connId)
 								_ = w.DefaultInvoker().WriteInvoke(NewInvokeRequest(connId, InvokePath_Transfer_Disconnect))
 							}()
@@ -307,7 +306,6 @@ func (w *TransportClient) onTransferDisconnect(invoker *Invoker, request *Invoke
 	if transfer != nil {
 		_ = transfer.Close()
 		w.deleteTransfer(request.RequestId)
-		log.Println("onTransferDisconnect:", request.RequestId)
 	}
 }
 

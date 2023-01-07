@@ -14,11 +14,6 @@ type CacheItem[T any] struct {
 	cache      *Cache[T]
 	expireChan <-chan time.Time
 	expireLock sync.Mutex
-	Closer
-}
-
-func (c *CacheItem[T]) removeItem() {
-	c.CtxCancel()
 }
 
 func (c *CacheItem[T]) expire(duration time.Duration) {
@@ -42,10 +37,6 @@ func (c *CacheItem[T]) expire(duration time.Duration) {
 
 func newCacheItem[T any](ctx context.Context, key string, value T, cache *Cache[T]) *CacheItem[T] {
 	item := &CacheItem[T]{Key: key, Value: value, cache: cache}
-	item.SetCtx(ctx)
-	item.SetOnClose(func() {
-		cache.Delete(key)
-	})
 	return item
 }
 

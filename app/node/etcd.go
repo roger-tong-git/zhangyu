@@ -149,13 +149,7 @@ func (s *EtcdOp) CreateLease(seconds int, keepalive bool) (clientv3.Lease, clien
 	ls := clientv3.NewLease(s.etcdCli)
 	resp, _ := ls.Grant(s.Ctx(), int64(seconds))
 	if keepalive {
-		keepAliveResp, _ := ls.KeepAlive(s.Ctx(), resp.ID)
-		go func() {
-			for {
-				ch := <-keepAliveResp
-				_ = ch
-			}
-		}()
+		_, _ = ls.KeepAlive(s.Ctx(), resp.ID)
 	}
 	return ls, resp.ID
 }
