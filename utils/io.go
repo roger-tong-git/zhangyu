@@ -2,7 +2,6 @@ package utils
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -86,38 +85,4 @@ func (l *logFileWriter) Write(p []byte) (n int, err error) {
 	}()
 
 	return logfile.Write(p)
-}
-
-func ReadBytes(reader io.Reader, readLen int) (*[]byte, error) {
-	b := make([]byte, readLen)
-	r := make([]byte, 0)
-	totalRead := 0
-	for {
-		if readSize, err := reader.Read(b); err != nil {
-			return nil, err
-		} else {
-			r = append(r, b[:readSize]...)
-			totalRead += readSize
-			if totalRead >= readLen {
-				break
-			}
-		}
-	}
-	return &r, nil
-}
-
-func WriteBytes(writer io.Writer, b []byte) error {
-	totalWrite := 0
-	writeLen := len(b)
-	for {
-		if l, err := writer.Write(b[totalWrite:]); err != nil {
-			return err
-		} else {
-			totalWrite += l
-			if totalWrite >= writeLen {
-				break
-			}
-		}
-	}
-	return nil
 }

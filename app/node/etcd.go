@@ -19,25 +19,7 @@ const (
 	EtcdKey_Client_MapItem        = "/zhangyu/clients/records/%v/transferMaps/[%v]"
 	EtcdKey_Client_TransferPrefix = "/zhangyu/clients/records/%v/transferMaps/"
 	EtcdKey_HttpDomain_Bind       = "/zhangyu/domain/binds"
-
-	// EtcdKey_Transfer_Local_TargetIn 目标流量连接进入到node时，etcd中会收到这个通知
-	EtcdKey_Transfer_Local_TargetIn = "/zhangyu/transfer/local/%v/target/in/"
-
-	// EtcdKey_Transfer_Local_ListenIn 监听流量连接进入到Node时，etcd中会收到这个通知
-	EtcdKey_Transfer_Local_ListenIn = "/zhangyu/transfer/local/%v/listen/in/"
 )
-
-func GetEtcdCommandPrefix(etcdKey string, terminalId string) string {
-	return fmt.Sprintf(etcdKey, terminalId)
-}
-
-func GetEtcdCommand(etcdKey string, terminalId string, connId string) string {
-	return GetEtcdCommandPrefix(etcdKey, terminalId) + connId
-}
-
-func GetEtcdCommandConnId(command string, etcdKey string, terminalId string) string {
-	return strings.TrimPrefix(command, GetEtcdCommandPrefix(etcdKey, terminalId))
-}
 
 type EtcdOp struct {
 	EtcdUri string //Etcd连接字符串

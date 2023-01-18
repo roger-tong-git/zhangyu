@@ -1,11 +1,11 @@
 package app
 
 import (
-	"github.com/roger-tong-git/zhangyu/network"
+	"github.com/roger-tong-git/zhangyu/rpc"
 )
 
 type ClientSession struct {
 	ClientIP      string
-	ClientInvoker *network.Invoker `json:"-"`
-	network.ClientConnInfo
+	ClientInvoker *rpc.Invoker `json:"-"`
+	rpc.ClientConnInfo
 }

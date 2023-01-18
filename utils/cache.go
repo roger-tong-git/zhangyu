@@ -44,7 +44,12 @@ type Cache[T any] struct {
 	cacheMap      map[string]*CacheItem[T]
 	mapLocker     sync.Mutex
 	expireHandler func(key string, value any)
+	deleteHandler func(key string)
 	Closer
+}
+
+func (s *Cache[T]) SetDeleteHandler(deleteHandler func(key string)) {
+	s.deleteHandler = deleteHandler
 }
 
 func (s *Cache[T]) SetExpireHandler(expireHandler func(key string, value any)) {
@@ -66,6 +71,14 @@ func (s *Cache[T]) Get(key string) T {
 
 func (s *Cache[T]) getKey(key string) string {
 	return strings.TrimSpace(strings.ToLower(key))
+}
+
+func (s *Cache[T]) HasKey(key string) bool {
+	defer s.mapLocker.Unlock()
+	s.mapLocker.Lock()
+
+	_, ok := s.cacheMap[key]
+	return ok
 }
 
 func (s *Cache[T]) Set(key string, value T) {
@@ -114,6 +127,10 @@ func (s *Cache[T]) SetValue(key string, value T, duration time.Duration) {
 }
 
 func (s *Cache[T]) Delete(key string) {
+	if s.deleteHandler != nil {
+		s.deleteHandler(key)
+	}
+
 	defer s.mapLocker.Unlock()
 	s.mapLocker.Lock()
 	delete(s.cacheMap, key)
