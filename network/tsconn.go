@@ -115,8 +115,8 @@ func (w *TransportClient) heartbeat() {
 	}
 }
 
-func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
-	_ = w.Dial(addr, w.clientInfo.ConnectionId, Connection_Command, func(invoker *Invoker) {
+func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) error {
+	err := w.Dial(addr, w.clientInfo.ConnectionId, Connection_Command, func(invoker *Invoker) {
 		w.invokeRoute.SetDefaultInvoker(invoker)
 		invoker.SetWriteErrorHandler(func(_ error) {
 			w.connected = false
@@ -147,6 +147,8 @@ func (w *TransportClient) ConnectTo(addr string, connectedHandler func()) {
 			}
 		}
 	}()
+
+	return err
 }
 
 func (w *TransportClient) initEvents() {

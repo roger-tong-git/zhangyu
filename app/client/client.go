@@ -10,6 +10,18 @@ import (
 	"time"
 )
 
+func StartClient(serverAddr string) bool {
+	c := &Client{}
+	c.connectionId = uuid.New().String()
+	utils.ReadJsonSetting("client.json", c, func() {
+		c.TerminalId = uuid.New().String()
+	})
+	c.NodeAddr = serverAddr
+	c.SetCtx(context.Background())
+	c.SetOnClose(c.onClose)
+	return c.Connect() == nil
+}
+
 type Client struct {
 	TerminalId       string `json:"terminalId,omitempty"`
 	NodeAddr         string `json:"nodeAddr,omitempty"`
@@ -33,7 +45,7 @@ func (c *Client) Close() {
 }
 
 // Connect 注册新的客户端
-func (c *Client) Connect() {
+func (c *Client) Connect() error {
 	cliInfo := &network.ClientConnInfo{}
 	cliInfo.TerminalId = c.TerminalId
 	cliInfo.ConnectionId = c.connectionId
@@ -41,7 +53,7 @@ func (c *Client) Connect() {
 	cliInfo.Type = network.TerminalType_Client
 	c.transportCli = network.NewTransferClient(c.Ctx(), cliInfo)
 
-	c.transportCli.ConnectTo(c.NodeAddr, func() {
+	return c.transportCli.ConnectTo(c.NodeAddr, func() {
 		time.Sleep(time.Second)
 		path := network.InvokePath_Client_Register
 		if c.Token != "" || c.TunnelId != "" {
@@ -93,6 +105,6 @@ func NewClient(ctx context.Context) *Client {
 	})
 	c.SetCtx(ctx)
 	c.SetOnClose(c.onClose)
-	c.Connect()
+	_ = c.Connect()
 	return c
 }
