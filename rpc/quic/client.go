@@ -68,9 +68,9 @@ func (c *Client) RemoveRpcHandler(path string) {
 func (c *Client) Dial(addr string, connId string, connType string,
 	connectedHandler func(invoker *rpc.Invoker, session *webtransport.Session)) error {
 	header := http.Header{}
-	header.Set(rpc.HeadKey_CommandConnectionId, c.clientInfo.ConnectionId)
-	header.Set(rpc.HeadKey_ConnectionId, connId)
-	header.Set(rpc.HeadKey_ConnectionType, connType)
+	header.Set(rpc.HeadKey_Connection_TerminalId, c.clientInfo.TerminalId)
+	header.Set(rpc.HeadKey_Connection_Id, connId)
+	header.Set(rpc.HeadKey_Connection_Type, connType)
 
 	var err error
 	var d webtransport.Dialer
@@ -87,7 +87,7 @@ func (c *Client) Dial(addr string, connId string, connType string,
 	} else {
 		c.connected = true
 		isCommand := connType == rpc.ConnectionType_Command
-		invoker := c.invokeRoute.AddNewInvoker(connId, isCommand, stream)
+		invoker := c.invokeRoute.AddNewInvoker(connId, c.clientInfo.TerminalId, c.Ctx(), stream)
 		invoker.SetAttach("Session", session)
 		invoker.SetAttach("Conn", NewConnWrapper(invoker.Ctx(), stream, session))
 		invoker.SetOnClose(func() {
@@ -117,7 +117,7 @@ func (c *Client) heartbeat() {
 			if !c.connected {
 				continue
 			}
-			req := rpc.NewInvokeRequest(c.clientInfo.ConnectionId, rpc.InvokePath_Client_Heartbeat)
+			req := rpc.NewInvokeRequest(rpc.InvokePath_Client_Heartbeat)
 			_ = c.DefaultInvoker().WriteRequest(req)
 		}
 	}
@@ -126,12 +126,12 @@ func (c *Client) heartbeat() {
 func (c *Client) ConnectTo() error {
 	err := c.Dial(c.serverAddr, c.clientInfo.ConnectionId, rpc.ConnectionType_Command,
 		func(invoker *rpc.Invoker, _ *webtransport.Session) {
-			log.Println(fmt.Sprintf("已连接到SocksCloud服务端,当前客户ID[%v]", c.clientInfo.ConnectionId))
+			log.Println(fmt.Sprintf("已连接到SocksCloud服务端,当前客户ID[%v]", c.clientInfo.TerminalId))
 			c.invokeRoute.SetDefaultInvoker(invoker)
 			invoker.SetWriteErrorHandler(func(_ error) {
 				c.connected = false
 			})
-			req := rpc.NewInvokeRequest(c.clientInfo.ConnectionId, rpc.InvokePath_Client_Heartbeat)
+			req := rpc.NewInvokeRequest(rpc.InvokePath_Client_Heartbeat)
 			_ = c.DefaultInvoker().WriteRequest(req)
 			go c.invokeRoute.DispatchInvoke(invoker)
 		})
@@ -215,7 +215,7 @@ func (c *Client) ConnectTo() error {
 //						w.Dial(w.serverAddr, connId, ConnectionType_From, func(invoker *Invoker) {
 //							invReq := NewInvokeRequest(uuid.New().String(), "")
 //							invReq.BodyJson = utils.GetJsonString(tq)
-//							invReq.Header[HeadKey_ConnectionId] = connId
+//							invReq.Header[HeadKey_Connection_Id] = connId
 //							invReq.Header[HeadKey_TunnelId] = w.clientInfo.TunnelId
 //							invReq.Header[HeadKey_TerminalId] = w.clientInfo.TerminalId
 //							reqErr := invoker.WriteInvoke(invReq)
@@ -297,7 +297,7 @@ func (c *Client) ConnectTo() error {
 //func (w *Client) onTransferConnDial(_ *Invoker, r *InvokeRequest) {
 //	transferMapReq := &TransferRequest{}
 //	utils.GetJsonValue(transferMapReq, r.BodyJson)
-//	connId := r.Header[HeadKey_ConnectionId]
+//	connId := r.Header[HeadKey_Connection_Id]
 //	if err := w.connectTarget(connId, transferMapReq); err != nil {
 //		log.Println(fmt.Sprintf("被控通道[%v]连接到目标服务[%v]失败:%v",
 //			transferMapReq.TargetTerminalTunnelId, transferMapReq.TargetTerminalUri, err.Error()))
@@ -306,7 +306,7 @@ func (c *Client) ConnectTo() error {
 //}
 //
 //func (w *Client) onTransferGo(invoker *Invoker, r *InvokeRequest) {
-//	connId := r.Header[HeadKey_ConnectionId]
+//	connId := r.Header[HeadKey_Connection_Id]
 //	transfer := w.getTransfer(connId)
 //	if transfer != nil {
 //		transfer.TransferChan() <- true

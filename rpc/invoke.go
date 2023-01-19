@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"github.com/roger-tong-git/zhangyu/utils"
 	"io"
 	"log"
@@ -33,10 +34,10 @@ type InvokeRequest struct {
 	Path string
 }
 
-func NewInvokeRequest(requestId string, path string) *InvokeRequest {
+func NewInvokeRequest(path string) *InvokeRequest {
 	re := &InvokeRequest{Path: path}
 	re.Header = map[string]string{}
-	re.RequestId = requestId
+	re.RequestId = uuid.New().String()
 	return re
 }
 
@@ -64,8 +65,10 @@ type InvokeResponse struct {
 
 type Invoker struct {
 	remoteAddr        string
-	connectionId      string
+	invokerId         string
+	terminalId        string
 	isCommandTunnel   bool
+	connectionType    ConnectionType
 	writerLock        *sync.Mutex
 	readerLock        *sync.Mutex
 	attach            map[string]any
@@ -75,6 +78,26 @@ type Invoker struct {
 	readWriter        io.ReadWriteCloser
 	invokeRoute       *InvokeRoute
 	utils.Closer
+}
+
+func (i *Invoker) ConnectionType() ConnectionType {
+	return i.connectionType
+}
+
+func (i *Invoker) SetConnectionType(connectionType ConnectionType) {
+	i.connectionType = connectionType
+}
+
+func (i *Invoker) SetIsCommandTunnel(isCommandTunnel bool) {
+	i.isCommandTunnel = isCommandTunnel
+}
+
+func (i *Invoker) TerminalId() string {
+	return i.terminalId
+}
+
+func (i *Invoker) SetTerminalId(terminalId string) {
+	i.terminalId = terminalId
 }
 
 func (i *Invoker) RemoteAddr() string {
@@ -129,16 +152,17 @@ func (i *Invoker) SetWriteErrorHandler(writeErrorHandler func(err error)) {
 }
 
 func (i *Invoker) ConnectionId() string {
-	return i.connectionId
+	return i.invokerId
 }
 
 func (i *Invoker) ReadWriter() io.ReadWriteCloser {
 	return i.readWriter
 }
 
-func NewInvoker(ctx context.Context, id string, readWriter io.ReadWriteCloser) *Invoker {
+func NewInvoker(ctx context.Context, invokerId string, terminalId string, readWriter io.ReadWriteCloser) *Invoker {
 	re := &Invoker{
-		connectionId:  id,
+		invokerId:     invokerId,
+		terminalId:    terminalId,
 		readWriter:    readWriter,
 		writerLock:    &sync.Mutex{},
 		readerLock:    &sync.Mutex{},
@@ -311,10 +335,9 @@ func (r *InvokeRoute) getLeaseDuration() time.Duration {
 	return time.Duration(r.leaseSeconds) * time.Second
 }
 
-func (r *InvokeRoute) AddNewInvoker(id string, isCommand bool, readWriter io.ReadWriteCloser) *Invoker {
-	invoker := NewInvoker(r.Ctx(), id, readWriter)
-	invoker.isCommandTunnel = isCommand
-	r.invokes.Set(id, invoker)
+func (r *InvokeRoute) AddNewInvoker(invokerId string, terminalId string, ctx context.Context, readWriter io.ReadWriteCloser) *Invoker {
+	invoker := NewInvoker(ctx, invokerId, terminalId, readWriter)
+	r.invokes.Set(invokerId, invoker)
 	return invoker
 }
 
@@ -362,31 +385,31 @@ func (r *InvokeRoute) GetBidiHandler(path string) BidiInvokeHandler {
 	return r.bidiHandlers[strings.ToLower(strings.TrimSpace(path))]
 }
 
-func (r *InvokeRoute) HasInvoke(connId string) bool {
-	return r.invokes.HasKey(connId)
+func (r *InvokeRoute) HasInvoke(invokerId string) bool {
+	return r.invokes.HasKey(invokerId)
 }
 
-func (r *InvokeRoute) SetExpire(connId string, duration time.Duration) {
-	r.invokes.SetExpire(connId, duration)
+func (r *InvokeRoute) SetExpire(invokerId string, duration time.Duration) {
+	r.invokes.SetExpire(invokerId, duration)
 }
 
-func (r *InvokeRoute) GetInvoker(connId string) *Invoker {
-	return r.invokes.Get(connId)
+func (r *InvokeRoute) GetInvoker(invokerId string) *Invoker {
+	return r.invokes.Get(invokerId)
 }
 
-func (r *InvokeRoute) RemoveInvoker(connId string) {
-	r.invokes.Delete(connId)
+func (r *InvokeRoute) RemoveInvoker(invokerId string) {
+	r.invokes.Delete(invokerId)
 }
 
 func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 	for {
-		if !r.HasInvoke(invoker.connectionId) {
+		if !r.HasInvoke(invoker.invokerId) {
 			break
 		}
 		req, resp, err := invoker.ReadInvoke()
 		if err != nil {
 			invoker.CtxCancel()
-			r.RemoveInvoker(invoker.connectionId)
+			r.RemoveInvoker(invoker.invokerId)
 			return
 		} else {
 			if resp != nil {
@@ -395,8 +418,8 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 			}
 
 			if req != nil {
-				if invoker.isCommandTunnel {
-					r.SetExpire(invoker.connectionId, r.getLeaseDuration())
+				if invoker.IsCommandTunnel() {
+					r.SetExpire(invoker.invokerId, r.getLeaseDuration())
 				}
 				uniHandler := r.GetUniHandler(req.Path)
 				if uniHandler != nil {
@@ -411,7 +434,7 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 						callResp = rpcHandler(invoker, req)
 						if callErr := invoker.WriteResponse(callResp); callErr != nil {
 							invoker.CtxCancel()
-							go r.RemoveInvoker(invoker.connectionId)
+							go r.RemoveInvoker(invoker.invokerId)
 							return
 						}
 					}()

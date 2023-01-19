@@ -5,7 +5,6 @@ import (
 )
 
 type ClientSession struct {
-	ClientIP      string
 	ClientInvoker *rpc.Invoker `json:"-"`
 	rpc.ClientConnInfo
 }

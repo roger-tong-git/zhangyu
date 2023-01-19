@@ -28,11 +28,11 @@ const (
 )
 
 const (
-	HeadKey_TerminalId          = "Zhangyu-TerminalId"
-	HeadKey_TunnelId            = "Zhangyu-TunnelId"
-	HeadKey_ConnectionId        = "Zhangyu-ConnectionId"         // 当前连接ID
-	HeadKey_CommandConnectionId = "Zhangyu-Command-ConnectionId" //主通道连接ID
-	HeadKey_ConnectionType      = "Zhangyu-ConnectionType"       //连接类型
+	HeadKey_TerminalId            = "Zhangyu-TerminalId"
+	HeadKey_TunnelId              = "Zhangyu-TunnelId"
+	HeadKey_Connection_Id         = "Zhangyu-Connection-Id"         //当前连接ID
+	HeadKey_Connection_TerminalId = "Zhangyu-Connection-TerminalId" //当前连接对应的终端ID
+	HeadKey_Connection_Type       = "Zhangyu-Connection-Type"       //连接类型
 )
 
 const (

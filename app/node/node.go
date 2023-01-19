@@ -217,7 +217,7 @@ func (s *Node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					})
 					s.setTransfer(httpConnId, transfer)
 					req := rpc.NewInvokeRequest(uuid.New().String(), rpc.InvokePath_Transfer_Dial)
-					req.Header[rpc.HeadKey_ConnectionId] = httpConnId
+					req.Header[rpc.HeadKey_Connection_Id] = httpConnId
 					req.Header[rpc.HeadKey_TunnelId] = tq.TargetTerminalTunnelId
 					req.BodyJson = utils.GetJsonString(tq)
 					go func() {
@@ -334,10 +334,10 @@ func (s *Node) initQuic() {
 func (s *Node) upgradeWebtransportConn(c echo.Context) error {
 	r := c.Request()
 	w := c.Response().Writer
-	connectionId := r.Header.Get(rpc.HeadKey_ConnectionId)
-	isCmdTrans := r.Header.Get(rpc.HeadKey_ConnectionType) == rpc.ConnectionType_Command
-	isTransferListen := r.Header.Get(rpc.HeadKey_ConnectionType) == rpc.ConnectionType_From
-	isTransferTarget := r.Header.Get(rpc.HeadKey_ConnectionType) == rpc.ConnectionType_Target
+	connectionId := r.Header.Get(rpc.HeadKey_Connection_Id)
+	isCmdTrans := r.Header.Get(rpc.HeadKey_Connection_Type) == rpc.ConnectionType_Command
+	isTransferListen := r.Header.Get(rpc.HeadKey_Connection_Type) == rpc.ConnectionType_From
+	isTransferTarget := r.Header.Get(rpc.HeadKey_Connection_Type) == rpc.ConnectionType_Target
 
 	//session.AcceptSession()
 	if session, err := s.transportServer.Upgrade(w, r); err != nil {
@@ -588,7 +588,7 @@ func (s *Node) getClientByTerminalId(terminalId string) *app.ClientSession {
 func (s *Node) transfer(req *rpc.InvokeRequest, transNow bool) {
 	tq := &rpc.TransferRequest{}
 	utils.GetJsonValue(tq, req.BodyJson)
-	connId := req.Header[rpc.HeadKey_ConnectionId]
+	connId := req.Header[rpc.HeadKey_Connection_Id]
 	transfer := s.getTransfer(connId)
 
 	if transfer == nil {

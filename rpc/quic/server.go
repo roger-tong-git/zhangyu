@@ -21,9 +21,16 @@ import (
 	"time"
 )
 
+// ServerAdapter 服务适配接口
 type ServerAdapter interface {
-	ConnectionIn(connId string, connType string, invoker *rpc.Invoker)
-	GetMasterInvoker(masterConnId string) *rpc.Invoker
+	// ConnectionIn 连接进入时的处理过程
+	ConnectionIn(connId string, connType rpc.ConnectionType, invoker *rpc.Invoker)
+
+	// GetInvoker 取得终端ID对应的Invoker，存在跨服务端的情况
+	GetInvoker(terminalId string) *rpc.Invoker
+
+	// GetContext 取得终端ID对应的Context，存在跨服务端的情况
+	GetContext(terminalId string) context.Context
 }
 
 type Server struct {
@@ -81,11 +88,11 @@ func (s *Server) generateTLSConfig() {
 //暂时只取当前节点的
 
 func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
-	connectionId := r.Header.Get(rpc.HeadKey_ConnectionId)
-	commandConnId := r.Header.Get(rpc.HeadKey_CommandConnectionId)
-	connectionType := r.Header.Get(rpc.HeadKey_ConnectionType)
+	connectionId := r.Header.Get(rpc.HeadKey_Connection_Id)
+	terminalId := r.Header.Get(rpc.HeadKey_Connection_TerminalId)
+	connectionType := rpc.ConnectionType(r.Header.Get(rpc.HeadKey_Connection_Type))
 	isCmdTrans := connectionType == rpc.ConnectionType_Command
-	cmdInvoker := s.adapter.GetMasterInvoker(commandConnId)
+	cmdInvoker := s.adapter.GetInvoker(terminalId)
 	remoteAddr := utils.GetRealRemoteAddr(r)
 
 	if !isCmdTrans && cmdInvoker == nil {
@@ -106,7 +113,11 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	invoker := s.invokeRoute.AddNewInvoker(connectionId, isCmdTrans, stream)
+
+	ctx := s.adapter.GetContext(terminalId)
+	var invoker = s.invokeRoute.AddNewInvoker(connectionId, terminalId, ctx, stream)
+	invoker.SetIsCommandTunnel(isCmdTrans)
+	invoker.SetConnectionType(connectionType)
 	invoker.SetRemoteAddr(remoteAddr)
 	invoker.SetAttach("Session", session)
 	invoker.SetAttach("Conn", NewConnWrapper(invoker.Ctx(), stream, session))
