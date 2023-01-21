@@ -21,6 +21,8 @@ const (
 	InvokePath_Transfer_Listen      = "/transfer/listen"
 	InvokePath_Transfer_Disconnect  = "/transfer/disconnect"
 	InvokePath_Client_Kick          = "/client/kick"
+	InvokePath_Client_SetId         = "/client/connection/id"
+	InvokePath_Client_New           = "/client/record/new"
 	InvokePath_Client_Register      = "/client/register"
 	InvokePath_Client_Login         = "/client/login"
 	InvokePath_Client_Heartbeat     = "/client/heartbeat"

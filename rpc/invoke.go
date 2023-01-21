@@ -25,8 +25,8 @@ func (i *InvokeData) PutValue(value any) {
 	i.JsonBody = utils.GetJsonString(value)
 }
 
-func (i *InvokeData) GetValue(value any) {
-	utils.GetJsonValue(value, i.JsonBody)
+func (i *InvokeData) GetValue(value any) bool {
+	return utils.GetJsonValue(value, i.JsonBody)
 }
 
 type InvokeRequest struct {
@@ -41,6 +41,11 @@ func NewInvokeRequest(path string) *InvokeRequest {
 	return re
 }
 
+func (ir *InvokeRequest) PutValue(v any) *InvokeRequest {
+	ir.JsonBody = utils.GetJsonString(v)
+	return ir
+}
+
 func NewInvokeResponse(requestId string, resultCode InvokeResult, message string) *InvokeResponse {
 	re := &InvokeResponse{ResultCode: resultCode}
 	re.Header = map[string]string{}
@@ -49,12 +54,12 @@ func NewInvokeResponse(requestId string, resultCode InvokeResult, message string
 	return re
 }
 
-func NewSuccessResponse(requestId string, format string, a ...any) *InvokeResponse {
-	return NewInvokeResponse(requestId, InvokeResult_Success, fmt.Sprintf(format, a))
+func NewSuccessResponse(requestId string, message string) *InvokeResponse {
+	return NewInvokeResponse(requestId, InvokeResult_Success, message)
 }
 
-func NewErrorResponse(requestId string, format string, a ...any) *InvokeResponse {
-	return NewInvokeResponse(requestId, InvokeResult_Error, fmt.Sprintf(format, a))
+func NewErrorResponse(requestId string, message string) *InvokeResponse {
+	return NewInvokeResponse(requestId, InvokeResult_Error, message)
 }
 
 type InvokeResponse struct {
@@ -63,8 +68,14 @@ type InvokeResponse struct {
 	ResultMessage string
 }
 
+func (ir *InvokeResponse) PutValue(v any) *InvokeResponse {
+	ir.JsonBody = utils.GetJsonString(v)
+	return ir
+}
+
 type Invoker struct {
 	remoteAddr        string
+	clientIP          string
 	invokerId         string
 	terminalId        string
 	isCommandTunnel   bool
@@ -75,9 +86,22 @@ type Invoker struct {
 	invokeMap         map[string]chan *InvokeResponse
 	invokeMapLock     *sync.Mutex
 	writeErrorHandler func(err error)
+	readErrorHandler  func(err error)
 	readWriter        io.ReadWriteCloser
 	invokeRoute       *InvokeRoute
 	utils.Closer
+}
+
+func (i *Invoker) SetReadErrorHandler(readErrorHandler func(err error)) {
+	i.readErrorHandler = readErrorHandler
+}
+
+func (i *Invoker) ClientIP() string {
+	return i.clientIP
+}
+
+func (i *Invoker) SetClientIP(clientIP string) {
+	i.clientIP = clientIP
 }
 
 func (i *Invoker) ConnectionType() ConnectionType {
@@ -151,7 +175,7 @@ func (i *Invoker) SetWriteErrorHandler(writeErrorHandler func(err error)) {
 	i.writeErrorHandler = writeErrorHandler
 }
 
-func (i *Invoker) ConnectionId() string {
+func (i *Invoker) InvokerId() string {
 	return i.invokerId
 }
 
@@ -188,10 +212,16 @@ func (i *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
 
 	str, err := bufio.NewReader(i.readWriter).ReadString('\n')
 	if err != nil {
+		if i.readErrorHandler != nil {
+			i.readErrorHandler(err)
+		}
 		return nil, nil, err
 	}
 
 	if bytes, deErr := base64.StdEncoding.DecodeString(str); deErr != nil {
+		if i.readErrorHandler != nil {
+			i.readErrorHandler(deErr)
+		}
 		log.Println("base64解码失败")
 		return nil, nil, deErr
 	} else {
@@ -236,13 +266,21 @@ func (i *Invoker) getResponseChan(request *InvokeRequest) chan *InvokeResponse {
 	}
 }
 
+func (i *Invoker) RemoveResponseChan(requestId string) {
+	defer i.invokeMapLock.Unlock()
+	i.invokeMapLock.Lock()
+	delete(i.invokeMap, requestId)
+}
+
 func (i *Invoker) Invoke(request *InvokeRequest) (*InvokeResponse, error) {
+	var respChan = i.getResponseChan(request)
+	defer i.RemoveResponseChan(request.RequestId)
+
 	err := i.WriteRequest(request)
 	if err != nil {
 		return nil, err
 	}
 
-	var respChan chan *InvokeResponse
 	var resp *InvokeResponse
 	select {
 	case <-i.Ctx().Done():
@@ -250,6 +288,7 @@ func (i *Invoker) Invoke(request *InvokeRequest) (*InvokeResponse, error) {
 	case resp = <-respChan:
 		break
 	}
+
 	if resp == nil {
 		return nil, errors.New("invoker context done")
 	}
@@ -335,9 +374,24 @@ func (r *InvokeRoute) getLeaseDuration() time.Duration {
 	return time.Duration(r.leaseSeconds) * time.Second
 }
 
-func (r *InvokeRoute) AddNewInvoker(invokerId string, terminalId string, ctx context.Context, readWriter io.ReadWriteCloser) *Invoker {
+func (r *InvokeRoute) AddAcceptInvoker(invokerId string, terminalId string, ctx context.Context, readWriter io.ReadWriteCloser) *Invoker {
 	invoker := NewInvoker(ctx, invokerId, terminalId, readWriter)
 	r.invokes.Set(invokerId, invoker)
+	_, _ = bufio.NewReader(invoker.readWriter).ReadByte()
+	return invoker
+}
+
+func (r *InvokeRoute) AddDialInvoker(ctx context.Context, readWriter io.ReadWriteCloser) *Invoker {
+	invoker := NewInvoker(ctx, "", "", readWriter)
+	w := bufio.NewWriter(readWriter)
+	_ = w.WriteByte(88)
+	_ = w.Flush()
+	req, _, _ := invoker.ReadInvoke()
+	if req != nil {
+		invoker.invokerId = req.Header["InvokerId"]
+		invoker.terminalId = req.Header["TerminalId"]
+	}
+	r.invokes.Set(invoker.invokerId, invoker)
 	return invoker
 }
 
@@ -408,7 +462,7 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 		}
 		req, resp, err := invoker.ReadInvoke()
 		if err != nil {
-			invoker.CtxCancel()
+			_ = invoker.Close()
 			r.RemoveInvoker(invoker.invokerId)
 			return
 		} else {
@@ -429,6 +483,7 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 
 				rpcHandler := r.GetBidiHandler(req.Path)
 				if rpcHandler != nil {
+
 					go func() {
 						var callResp *InvokeResponse
 						callResp = rpcHandler(invoker, req)

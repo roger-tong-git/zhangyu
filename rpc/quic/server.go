@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -9,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"github.com/google/uuid"
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/marten-seemann/webtransport-go"
 	"github.com/roger-tong-git/zhangyu/rpc"
@@ -31,6 +31,11 @@ type ServerAdapter interface {
 
 	// GetContext 取得终端ID对应的Context，存在跨服务端的情况
 	GetContext(terminalId string) context.Context
+
+	// OnNewClientRec 建立新的客户端记录
+	OnNewClientRec() *rpc.ClientRec
+
+	OnCloseClient(invoker *rpc.Invoker)
 }
 
 type Server struct {
@@ -88,12 +93,20 @@ func (s *Server) generateTLSConfig() {
 //暂时只取当前节点的
 
 func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
-	connectionId := r.Header.Get(rpc.HeadKey_Connection_Id)
 	terminalId := r.Header.Get(rpc.HeadKey_Connection_TerminalId)
 	connectionType := rpc.ConnectionType(r.Header.Get(rpc.HeadKey_Connection_Type))
 	isCmdTrans := connectionType == rpc.ConnectionType_Command
 	cmdInvoker := s.adapter.GetInvoker(terminalId)
 	remoteAddr := utils.GetRealRemoteAddr(r)
+	isNewClient := false
+	var clientRec *rpc.ClientRec
+
+	if isCmdTrans && terminalId == "" {
+		//terminalId为空，表明当前客户端为新的客户端，需要产生新客户端的tunnelId/terminalId
+		clientRec = s.adapter.OnNewClientRec()
+		isNewClient = true
+		terminalId = clientRec.ClientId
+	}
 
 	if !isCmdTrans && cmdInvoker == nil {
 		// 如果不是命令通道，必须有依附的命令通道存在
@@ -104,6 +117,7 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 	session, err := s.webTransPort.Upgrade(w, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println(err)
 		return
 	}
 
@@ -111,41 +125,71 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 	stream, err = session.AcceptStream(s.Ctx())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+	ctx := s.adapter.GetContext(terminalId)
+	//分配connectionId给新的连接
+	invokerId := uuid.New().String()
+	var invoker = s.invokeRoute.AddAcceptInvoker(invokerId, terminalId, ctx, stream)
+	req := rpc.NewInvokeRequest(rpc.InvokePath_Client_SetId)
+	req.Header["InvokerId"] = invokerId
+	req.Header["TerminalId"] = terminalId
+
+	err = invoker.WriteRequest(req)
+	if err != nil {
+		_ = invoker.Close()
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	ctx := s.adapter.GetContext(terminalId)
-	var invoker = s.invokeRoute.AddNewInvoker(connectionId, terminalId, ctx, stream)
 	invoker.SetIsCommandTunnel(isCmdTrans)
 	invoker.SetConnectionType(connectionType)
 	invoker.SetRemoteAddr(remoteAddr)
+	invoker.SetClientIP(utils.GetRealRemoteAddr(r))
 	invoker.SetAttach("Session", session)
 	invoker.SetAttach("Conn", NewConnWrapper(invoker.Ctx(), stream, session))
+	invoker.SetReadErrorHandler(func(_ error) {
+		_ = invoker.Close()
+	})
+	invoker.SetWriteErrorHandler(func(_ error) {
+		_ = invoker.Close()
+	})
 	invoker.SetOnClose(func() {
 		_ = invoker.ReadWriter().Close()
 		_ = session.CloseWithError(0, "")
-		s.invokeRoute.RemoveInvoker(connectionId)
+		s.invokeRoute.RemoveInvoker(invokerId)
 		if isCmdTrans {
-			log.Println(fmt.Sprintf("已关闭客户端[%v]连接", connectionId))
+			s.adapter.OnCloseClient(invoker)
+			s.adapter.OnCloseClient(invoker)
+			log.Println(fmt.Sprintf("已关闭客户端[%v]连接", invokerId))
 		}
 	})
 
+	if isNewClient && clientRec != nil {
+		req := rpc.NewInvokeRequest(rpc.InvokePath_Client_New)
+		req.PutValue(clientRec)
+		err = invoker.WriteRequest(req)
+		if err != nil {
+			_ = invoker.Close()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
 	if isCmdTrans {
-		log.Println(fmt.Sprintf("客户端[%v]已连接到Quic服务", invoker.ConnectionId()))
-		s.invokeRoute.SetExpire(connectionId, time.Second*30)
+		log.Println(fmt.Sprintf("客户端[%v]已连接到Quic服务", invoker.TerminalId()))
+		s.invokeRoute.SetExpire(invokerId, time.Second*30)
 		s.invokeRoute.DispatchInvoke(invoker)
 	} else {
 		// 非命令通道，为了推动Accept，通道连接后，会发布一个Accept推动字节，通道首个字节为88
-		if _, err = bufio.NewReader(invoker.ReadWriter()).ReadByte(); err != nil {
-			_ = invoker.Close()
-		}
-		s.adapter.ConnectionIn(connectionId, connectionType, invoker)
+		s.adapter.ConnectionIn(invokerId, connectionType, invoker)
 	}
 }
 
 func (s *Server) OnInvokerHeartbeat(invoker *rpc.Invoker, request *rpc.InvokeRequest) {
 	if invoker.IsCommandTunnel() {
-		s.invokeRoute.SetExpire(invoker.ConnectionId(), time.Second*30)
+		s.invokeRoute.SetExpire(invoker.InvokerId(), time.Second*30)
 	}
 }
 
@@ -171,8 +215,9 @@ func NewServer(ctx context.Context, quicPort int, quicPath string, adapter Serve
 	re.invokeRoute = rpc.NewInvokeRoute(re.Ctx())
 	re.invokeRoute.SetLeaseSeconds(re.LeaseSeconds())
 	re.generateTLSConfig()
+
 	certs := make([]tls.Certificate, 1)
-	certs[0], _ = tls.LoadX509KeyPair("cloud.pem", "cloud.key")
+	certs[0], _ = tls.LoadX509KeyPair("server.pem", "server.key")
 	tlsConfig := &tls.Config{
 		Certificates: certs,
 	}
@@ -199,6 +244,11 @@ func NewServer(ctx context.Context, quicPort int, quicPath string, adapter Serve
 	go func() {
 		log.Println(fmt.Sprintf("QUIC[:%v]服务启动,QUIC路径[%v]", quicPort, quicPath))
 		_ = re.webTransPort.ListenAndServe()
+	}()
+
+	go func() {
+		log.Println(fmt.Sprintf("HTTP[:%v]服务启动", quicPort))
+		_ = http.ListenAndServe(fmt.Sprintf(":%v", quicPort), re.httpMux)
 	}()
 
 	return re

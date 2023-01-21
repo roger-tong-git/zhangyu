@@ -22,7 +22,7 @@ type NodeInfo struct {
 	ConnectionInfo
 }
 
-// ClientInfo 客户端信息
+// ClientInfo 章鱼客户端信息
 type ClientInfo struct {
 	TunnelId string
 	AuthCode string
@@ -30,7 +30,7 @@ type ClientInfo struct {
 	TerminalInfo
 }
 
-// ClientConnInfo 客户端连接信息
+// ClientConnInfo 章鱼客户端连接信息
 type ClientConnInfo struct {
 	NodeId string
 	ClientInfo

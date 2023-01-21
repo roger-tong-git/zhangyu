@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -14,14 +13,35 @@ import (
 	"time"
 )
 
+type ClientAdapter interface {
+	OnNewClient(clientRec *rpc.ClientRec)
+	OnConnected(invoker *rpc.Invoker)
+	GetTerminalId() string
+	SetTerminalId(terminalId string)
+	GetConnectionId() string
+	SetConnectionId(connectionId string)
+}
+
 // Client WebTransport客户端
 type Client struct {
-	clientInfo   *rpc.ClientConnInfo
-	invokeRoute  *rpc.InvokeRoute
-	connected    bool
-	keepaliveRun bool
-	serverAddr   string
+	invokeRoute      *rpc.InvokeRoute
+	connected        bool
+	keepaliveRun     bool
+	serverAddr       string
+	heartBeatSeconds int
+	adapter          ClientAdapter
 	utils.Closer
+}
+
+func (c *Client) SetHeartBeatSeconds(heartBeatSeconds int) {
+	c.heartBeatSeconds = heartBeatSeconds
+}
+
+func (c *Client) getHeartBeatTime() time.Duration {
+	if c.heartBeatSeconds <= 0 {
+		c.heartBeatSeconds = 20
+	}
+	return time.Duration(c.heartBeatSeconds) * time.Second
 }
 
 func (c *Client) Connected() bool {
@@ -65,11 +85,10 @@ func (c *Client) RemoveRpcHandler(path string) {
 	c.invokeRoute.RemoveRpcHandler(path)
 }
 
-func (c *Client) Dial(addr string, connId string, connType string,
+func (c *Client) Dial(addr string, connType string,
 	connectedHandler func(invoker *rpc.Invoker, session *webtransport.Session)) error {
 	header := http.Header{}
-	header.Set(rpc.HeadKey_Connection_TerminalId, c.clientInfo.TerminalId)
-	header.Set(rpc.HeadKey_Connection_Id, connId)
+	header.Set(rpc.HeadKey_Connection_TerminalId, c.adapter.GetTerminalId())
 	header.Set(rpc.HeadKey_Connection_Type, connType)
 
 	var err error
@@ -86,21 +105,14 @@ func (c *Client) Dial(addr string, connId string, connType string,
 		return err1
 	} else {
 		c.connected = true
-		isCommand := connType == rpc.ConnectionType_Command
-		invoker := c.invokeRoute.AddNewInvoker(connId, c.clientInfo.TerminalId, c.Ctx(), stream)
+		invoker := c.invokeRoute.AddDialInvoker(c.Ctx(), stream)
 		invoker.SetAttach("Session", session)
 		invoker.SetAttach("Conn", NewConnWrapper(invoker.Ctx(), stream, session))
 		invoker.SetOnClose(func() {
 			_ = invoker.ReadWriter().Close()
 			_ = session.CloseWithError(0, "")
-			c.invokeRoute.RemoveInvoker(invoker.ConnectionId())
+			c.invokeRoute.RemoveInvoker(invoker.InvokerId())
 		})
-		if !isCommand {
-			// 非Command通道，写入一个字节，推动服务端Accept
-			if err = bufio.NewWriter(invoker.ReadWriter()).WriteByte(88); err != nil {
-				_ = invoker.Close()
-			}
-		}
 		if connectedHandler != nil {
 			connectedHandler(invoker, session)
 		}
@@ -113,28 +125,38 @@ func (c *Client) heartbeat() {
 		select {
 		case <-c.Ctx().Done():
 			return
-		case <-time.After(time.Second * 15):
+		case <-time.After(c.getHeartBeatTime()):
 			if !c.connected {
 				continue
 			}
 			req := rpc.NewInvokeRequest(rpc.InvokePath_Client_Heartbeat)
-			_ = c.DefaultInvoker().WriteRequest(req)
+			c.connected = c.DefaultInvoker().WriteRequest(req) == nil
 		}
 	}
 }
 
 func (c *Client) ConnectTo() error {
-	err := c.Dial(c.serverAddr, c.clientInfo.ConnectionId, rpc.ConnectionType_Command,
+	err := c.Dial(c.serverAddr, rpc.ConnectionType_Command,
 		func(invoker *rpc.Invoker, _ *webtransport.Session) {
-			log.Println(fmt.Sprintf("已连接到SocksCloud服务端,当前客户ID[%v]", c.clientInfo.TerminalId))
 			c.invokeRoute.SetDefaultInvoker(invoker)
+			invoker.SetIsCommandTunnel(true)
+			c.adapter.SetConnectionId(invoker.InvokerId())
+			c.adapter.SetTerminalId(invoker.TerminalId())
 			invoker.SetWriteErrorHandler(func(_ error) {
 				c.connected = false
 			})
-			req := rpc.NewInvokeRequest(rpc.InvokePath_Client_Heartbeat)
-			_ = c.DefaultInvoker().WriteRequest(req)
+			invoker.SetReadErrorHandler(func(_ error) {
+				c.connected = false
+			})
 			go c.invokeRoute.DispatchInvoke(invoker)
+			c.adapter.OnConnected(invoker)
+			log.Println(fmt.Sprintf("已连接到Zhangyu服务端,当前客户ID[%v]", c.adapter.GetTerminalId()))
+			log.Println(fmt.Sprintf("已连接到Zhangyu服务端,当前InvokerIDD[%v]", c.adapter.GetConnectionId()))
 		})
+
+	if err != nil {
+		log.Println(err)
+	}
 
 	go func() {
 		if c.keepaliveRun {
@@ -158,6 +180,12 @@ func (c *Client) ConnectTo() error {
 	}()
 
 	return err
+}
+
+func (c *Client) OnClientNew(invoker *rpc.Invoker, request *rpc.InvokeRequest) {
+	clientRec := &rpc.ClientRec{}
+	request.GetValue(clientRec)
+	c.adapter.OnNewClient(clientRec)
 }
 
 //func (w *Client) initEvents() {
@@ -322,9 +350,10 @@ func (c *Client) ConnectTo() error {
 //	}
 //}
 
-func NewTransferClient(ctx context.Context, serverAddr string, clientInfo *rpc.ClientConnInfo) *Client {
-	w := &Client{serverAddr: serverAddr, clientInfo: clientInfo}
+func NewClient(ctx context.Context, serverAddr string, adapter ClientAdapter) *Client {
+	w := &Client{serverAddr: serverAddr, adapter: adapter}
 	w.SetCtx(ctx)
 	w.invokeRoute = rpc.NewInvokeRoute(w.Ctx())
+	w.invokeRoute.AddUniHandler(rpc.InvokePath_Client_New, w.OnClientNew)
 	return w
 }

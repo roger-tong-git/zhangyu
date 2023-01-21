@@ -21,8 +21,8 @@ func GetJsonString(v interface{}) string {
 	return string(b)
 }
 
-func GetJsonValue(v interface{}, jsonStr string) {
-	_ = json.Unmarshal([]byte(jsonStr), v)
+func GetJsonValue(v interface{}, jsonStr string) bool {
+	return json.Unmarshal([]byte(jsonStr), v) == nil
 }
 
 func GetJsonFromReader(v interface{}, reader io.Reader) error {
