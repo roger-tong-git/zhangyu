@@ -215,6 +215,10 @@ func (s *Client) getOnlineClientKey(clientId string) string {
 	return fmt.Sprintf(Key_ClientOnline, clientId)
 }
 
+func (s *Client) getDomainKey(clientId string, domain string) string {
+	return fmt.Sprintf(Key_Domain, clientId, domain)
+}
+
 func (s *Client) RegisterNode(info *rpc.NodeInfo) {
 	s.nodeInfo = info
 
@@ -256,6 +260,20 @@ func (s *Client) GenerateTunnelId() string {
 	}
 }
 
+func (s *Client) GetJwtSignKey() string {
+	key := utils.RandStringWithLetterChar(32)
+	txn := clientv3.NewKV(s.etcdCli).Txn(s.Ctx())
+	txn.If(clientv3.Compare(clientv3.CreateRevision(Key_JwtSignKey), "=", 0)).
+		Then(clientv3.OpPut(Key_JwtSignKey, key)).
+		Else(clientv3.OpGet(Key_JwtSignKey))
+	txnResp, _ := txn.Commit()
+	if txnResp.Succeeded {
+		return key
+	} else {
+		return string(txnResp.OpResponse().Txn().Responses[0].GetResponseRange().Kvs[0].Value)
+	}
+}
+
 func (s *Client) GenerateNewClient() *rpc.ClientRec {
 	cInfo := &rpc.ClientRec{
 		ClientId:   uuid.New().String(),
@@ -284,6 +302,19 @@ func (s *Client) GetClientRec(clientId string) *rpc.ClientRec {
 	return nil
 }
 
+func (s *Client) GetTunnel(tunnelId string) *rpc.Tunnel {
+	tunnelKey := s.getTunnelKey(tunnelId)
+	tunnel := &rpc.Tunnel{}
+	if s.GetJsonValue(tunnelKey, tunnel) {
+		return tunnel
+	}
+	return nil
+}
+
+func (s *Client) getListenKey(listen *rpc.Listen) string {
+	return fmt.Sprintf(Key_ClientListen, listen.ListenClientId, listen.ListenAddr)
+}
+
 func (s *Client) GetOnlineClient(clientId string) *rpc.OnlineClient {
 	clientKey := s.getOnlineClientKey(clientId)
 	rec := &rpc.OnlineClient{}
@@ -301,4 +332,40 @@ func (s *Client) DeleteOnlineClient(clientId string) {
 func (s *Client) PutOnlineClient(clientId string, client *rpc.OnlineClient) {
 	clientKey := s.getOnlineClientKey(clientId)
 	_, _ = s.PutValueAndKeepAlive(clientKey, client, 10)
+}
+
+func (s *Client) GetDomainList(clientId string) []*rpc.Domain {
+	clientKey := s.getDomainKey(clientId, "")
+	domainList := make([]*rpc.Domain, 0)
+	s.GetArray(clientKey, func(jsonValue string) {
+		domain := &rpc.Domain{}
+		if utils.GetJsonValue(domain, jsonValue) {
+			listen := &rpc.Listen{}
+			if s.GetJsonValue(domain.ListenKey, listen) {
+				domain.ListenInfo = listen
+			}
+			domainList = append(domainList, domain)
+		}
+	})
+	return domainList
+}
+
+func (s *Client) AddListenWithTunnel(targetTunnelId, listenClientId, listenAddr, targetAddr string) {
+	listen := &rpc.Listen{
+		ListenClientId: listenClientId,
+		TargetTunnelId: targetTunnelId,
+		ListenAddr:     listenAddr,
+		TargetAddr:     targetAddr,
+		CreateTime:     time.Now(),
+	}
+
+	listenRec := s.GetClientRec(listenClientId)
+	targetTunnel := s.GetTunnel(targetTunnelId)
+	if listenRec != nil {
+		listen.ListenTunnelId = listenRec.TunnelId
+	}
+	if targetTunnel != nil {
+		listen.TargetClientId = targetTunnel.TerminalId
+	}
+	_, _ = s.PutValue(s.getListenKey(listen), listen)
 }

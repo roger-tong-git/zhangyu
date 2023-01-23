@@ -460,7 +460,18 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 		if !r.HasInvoke(invoker.invokerId) {
 			break
 		}
-		req, resp, err := invoker.ReadInvoke()
+		var req *InvokeRequest
+		var resp *InvokeResponse
+		var err error
+
+		select {
+		case <-invoker.Ctx().Done():
+			err = errors.New("invoker context done")
+			break
+		default:
+			req, resp, err = invoker.ReadInvoke()
+		}
+
 		if err != nil {
 			_ = invoker.Close()
 			r.RemoveInvoker(invoker.invokerId)

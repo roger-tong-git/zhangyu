@@ -51,10 +51,11 @@ ETCD连接键：
 */
 
 const (
-	Key_Domain       = "/zhangyu/domain/%v"
+	Key_JwtSignKey   = "/zhangyu/jwt/sign"
+	Key_Domain       = "/zhangyu/domain/%v/%v"
 	Key_NodeOnline   = "/zhangyu/node/online/%v"
 	Key_ClientOnline = "/zhangyu/client/online/%v"
 	Key_ClientTunnel = "/zhangyu/client/tunnel/%v"
 	Key_ClientRecord = "/zhangyu/client/record/%v"
-	Key_ClientListen = "/zhangyu/client/listen/%v/%v"
+	Key_ClientListen = "/zhangyu/client/listen/%v/[%v]"
 )

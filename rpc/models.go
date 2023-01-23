@@ -1,6 +1,8 @@
 package rpc
 
-import "time"
+import (
+	"time"
+)
 
 type OnlineNode struct {
 	NodeId         string
@@ -35,21 +37,36 @@ type ClientRec struct {
 }
 
 type Listen struct {
-	ListenKey      string
 	ListenClientId string
 	ListenTunnelId string
 	TargetClientId string
 	TargetTunnelId string
 	ListenAddr     string
 	TargetAddr     string
+	CreateTime     time.Time
 }
 
 type Domain struct {
 	DomainName string
 	ListenKey  string
+	ListenInfo *Listen `json:"listen_Info,omitempty"`
 }
 
-type ClientLoginRequest struct {
-	ClientId string
-	Token    string
+type LoginRequest struct {
+	ClientId string `json:"clientId,omitempty"`
+	Token    string `json:"token,omitempty"`
+	AppId    string `json:"appId,omitempty"`
+	Secret   string `json:"secret,omitempty"`
+}
+
+type ListenRequest struct {
+	ListenClientId string `json:"listenClientId"`
+	TargetTunnelId string `json:"targetTunnelId"`
+	TargetAuthCode string `json:"targetAuthCode"`
+	ListenAddr     string `json:"listenAddr"`
+	TargetAddr     string `json:"targetAddr,omitempty"`
+}
+
+type LoginResponse struct {
+	TokenString string `json:"tokenString"`
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -17,5 +18,6 @@ func main() {
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
 	_ = cli.Close()
+	time.Sleep(time.Millisecond * 200)
 	log.Println("client服务收到停止指令，服务将终止")
 }

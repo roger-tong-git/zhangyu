@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/roger-tong-git/zhangyu/rpc"
-	"github.com/roger-tong-git/zhangyu/rpc/quic"
+	"github.com/roger-tong-git/zhangyu/rpc/quic/cli"
 	"github.com/roger-tong-git/zhangyu/utils"
 	"log"
 	"os"
@@ -17,7 +17,7 @@ type Client struct {
 	Token            string `json:"token,omitempty"`
 	TunnelId         string `json:"-"`
 	ConnectionId     string `json:"-"`
-	client           *quic.Client
+	client           *cli.Client
 	utils.Closer     `json:"-"`
 }
 
@@ -55,7 +55,7 @@ func (c *Client) getServerAddr() string {
 }
 
 func (c *Client) InitClient(terminalId, token string) {
-	c.client = quic.NewClient(c.Ctx(), c.getServerAddr(), c)
+	c.client = cli.NewClient(c.Ctx(), c.getServerAddr(), c)
 	c.client.SetHeartBeatSeconds(c.HeartBeatSeconds)
 	_ = c.client.ConnectTo()
 
@@ -64,7 +64,7 @@ func (c *Client) InitClient(terminalId, token string) {
 
 func (c *Client) login() {
 	req := rpc.NewInvokeRequest(rpc.InvokePath_Client_Login)
-	loginReq := &rpc.ClientLoginRequest{
+	loginReq := &rpc.LoginRequest{
 		ClientId: c.TerminalId,
 		Token:    c.Token,
 	}

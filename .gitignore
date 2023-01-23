@@ -8,3 +8,5 @@ cmd/node/node.key
 cmd/node/node.pem
 front.json
 cmd/client/client
+cmd/node/server.key
+cmd/node/server.pem

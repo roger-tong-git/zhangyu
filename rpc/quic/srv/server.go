@@ -1,4 +1,4 @@
-package quic
+package srv
 
 import (
 	"context"
@@ -8,10 +8,13 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/marten-seemann/webtransport-go"
 	"github.com/roger-tong-git/zhangyu/rpc"
+	"github.com/roger-tong-git/zhangyu/rpc/quic"
 	"github.com/roger-tong-git/zhangyu/utils"
 	"log"
 	"math/big"
@@ -43,10 +46,14 @@ type Server struct {
 	quicPath     string
 	leaseSeconds int
 	invokeRoute  *rpc.InvokeRoute
-	httpMux      *http.ServeMux
+	httpRouter   *echo.Echo
 	webTransPort *webtransport.Server
 	adapter      ServerAdapter
 	utils.Closer `json:"-"`
+}
+
+func (s *Server) HttpRouter() *echo.Echo {
+	return s.httpRouter
 }
 
 func (s *Server) LeaseSeconds() int {
@@ -87,14 +94,11 @@ func (s *Server) generateTLSConfig() {
 	_ = crtFile.Close()
 }
 
-//取得主通道(命令通道)对应的Invoker
-//如果主通道(命令通道)在当前节点，则取当前节点Invokers中对应的主通道
-//如果主通道(命令通道)不在当前节点，对取转发命令通道，转发命令通道登记的connId为目标节点的ConnId
-//暂时只取当前节点的
-
-func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
-	terminalId := r.Header.Get(rpc.HeadKey_Connection_TerminalId)
-	connectionType := rpc.ConnectionType(r.Header.Get(rpc.HeadKey_Connection_Type))
+func (s *Server) upgradeWebTransport(c echo.Context) error {
+	r := c.Request()
+	w := c.Response().Writer
+	terminalId := c.Request().Header.Get(rpc.HeadKey_Connection_TerminalId)
+	connectionType := rpc.ConnectionType(c.Request().Header.Get(rpc.HeadKey_Connection_Type))
 	isCmdTrans := connectionType == rpc.ConnectionType_Command
 	cmdInvoker := s.adapter.GetInvoker(terminalId)
 	remoteAddr := utils.GetRealRemoteAddr(r)
@@ -111,14 +115,14 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 	if !isCmdTrans && cmdInvoker == nil {
 		// 如果不是命令通道，必须有依附的命令通道存在
 		http.Error(w, rpc.InvalidInvokerConnect.Error(), http.StatusInternalServerError)
-		return
+
 	}
 
 	session, err := s.webTransPort.Upgrade(w, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Println(err)
-		return
+		return err
 	}
 
 	var stream webtransport.Stream
@@ -126,7 +130,7 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Println(err)
-		return
+		return err
 	}
 	ctx := s.adapter.GetContext(terminalId)
 	//分配connectionId给新的连接
@@ -140,7 +144,7 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = invoker.Close()
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return err
 	}
 
 	invoker.SetIsCommandTunnel(isCmdTrans)
@@ -148,7 +152,7 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 	invoker.SetRemoteAddr(remoteAddr)
 	invoker.SetClientIP(utils.GetRealRemoteAddr(r))
 	invoker.SetAttach("Session", session)
-	invoker.SetAttach("Conn", NewConnWrapper(invoker.Ctx(), stream, session))
+	invoker.SetAttach("Conn", quic.NewConnWrapper(invoker.Ctx(), stream, session))
 	invoker.SetReadErrorHandler(func(_ error) {
 		_ = invoker.Close()
 	})
@@ -173,7 +177,7 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			_ = invoker.Close()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return err
 		}
 	}
 
@@ -185,9 +189,10 @@ func (s *Server) upgradeWebTransport(w http.ResponseWriter, r *http.Request) {
 		// 非命令通道，为了推动Accept，通道连接后，会发布一个Accept推动字节，通道首个字节为88
 		s.adapter.ConnectionIn(invokerId, connectionType, invoker)
 	}
+	return nil
 }
 
-func (s *Server) OnInvokerHeartbeat(invoker *rpc.Invoker, request *rpc.InvokeRequest) {
+func (s *Server) OnInvokerHeartbeat(invoker *rpc.Invoker, _ *rpc.InvokeRequest) {
 	if invoker.IsCommandTunnel() {
 		s.invokeRoute.SetExpire(invoker.InvokerId(), time.Second*30)
 	}
@@ -222,14 +227,15 @@ func NewServer(ctx context.Context, quicPort int, quicPath string, adapter Serve
 		Certificates: certs,
 	}
 
-	re.httpMux = http.NewServeMux()
-	re.httpMux.HandleFunc(quicPath, re.upgradeWebTransport)
+	gin.SetMode(gin.ReleaseMode)
+	re.httpRouter = echo.New()
+	re.httpRouter.Any(quicPath, re.upgradeWebTransport)
 
 	//初始化http3服务
 	h3 := http3.Server{
 		Addr:      fmt.Sprintf("0.0.0.0:%v", quicPort),
 		TLSConfig: tlsConfig,
-		Handler:   re.httpMux,
+		Handler:   re.httpRouter,
 	}
 
 	re.webTransPort = &webtransport.Server{
@@ -248,7 +254,7 @@ func NewServer(ctx context.Context, quicPort int, quicPath string, adapter Serve
 
 	go func() {
 		log.Println(fmt.Sprintf("HTTP[:%v]服务启动", quicPort))
-		_ = http.ListenAndServe(fmt.Sprintf(":%v", quicPort), re.httpMux)
+		_ = http.ListenAndServe(fmt.Sprintf(":%v", quicPort), re.httpRouter)
 	}()
 
 	return re

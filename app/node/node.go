@@ -1,15 +1,22 @@
 package node
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"github.com/golang-jwt/jwt"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"github.com/roger-tong-git/zhangyu/app"
 	"github.com/roger-tong-git/zhangyu/app/node/etcd"
 	"github.com/roger-tong-git/zhangyu/rpc"
-	"github.com/roger-tong-git/zhangyu/rpc/quic"
+	"github.com/roger-tong-git/zhangyu/rpc/quic/srv"
 	"github.com/roger-tong-git/zhangyu/utils"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -19,9 +26,15 @@ type Node struct {
 	QuicPort      int
 	ClientTimeOut int
 	connectionId  string
-	quicSrv       *quic.Server
+	quicSrv       *srv.Server
+	jwtSingKey    string
 	etcdOp        *etcd.Client
 	utils.Closer
+}
+
+func (n *Node) getJwtSignKey() string {
+	n.jwtSingKey = n.etcdOp.GetJwtSignKey()
+	return n.jwtSingKey
 }
 
 func (n *Node) ConnectionIn(connId string, connType rpc.ConnectionType, invoker *rpc.Invoker) {
@@ -47,9 +60,54 @@ func (n *Node) OnCloseClient(invoker *rpc.Invoker) {
 	}
 }
 
+func (n *Node) POST(path string, f echo.HandlerFunc) {
+	n.quicSrv.HttpRouter().POST(path, f)
+}
+
+func (n *Node) GET(path string, f echo.HandlerFunc) {
+	n.quicSrv.HttpRouter().GET(path, f)
+}
+
+func (n *Node) AuthGET(path string, f echo.HandlerFunc) {
+	n.quicSrv.HttpRouter().GET(path, f, n.verifyToken())
+}
+
+func (n *Node) AuthPOST(path string, f echo.HandlerFunc) {
+	n.quicSrv.HttpRouter().POST(path, f, n.verifyToken())
+}
+
+func (n *Node) verifyToken() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			jwtToken := c.Request().Header.Get("JwtToken")
+			if jwtToken == "" {
+				return c.JSON(200, utils.ErrResponse("身份认证失败,缺少JwtToken"))
+			} else {
+				token, err := app.ValidToken(jwtToken, n.getJwtSignKey())
+				if token.Valid {
+					claim := &app.Claim{}
+					if utils.GetJsonValue(claim, utils.GetJsonString(token.Claims)) {
+						c.Request().Header.Set("Zhangyu-ClientId", claim.ClientId)
+					}
+				} else if ve, ok := err.(*jwt.ValidationError); ok {
+					if ve.Errors&jwt.ValidationErrorExpired != 0 {
+						return c.JSON(200, utils.ErrResponse("身份认证失败,Token已失效"))
+					}
+				}
+			}
+			return next(c)
+		}
+	}
+}
+
 func (n *Node) init() {
 	n.quicSrv.AddRpcHandler(rpc.InvokePath_Client_Login, n.onInvokerClientLogin)
 	n.etcdOp.AddWatcher(fmt.Sprintf(etcd.Key_ClientOnline, ""), n.onWatcher_ClientOnline)
+
+	n.POST(HttpPath_Post_Login, n.httpHandler_Login)
+	n.GET(HttpPath_Get_DomainList, n.httpHandler_DomainList)
+	n.AuthPOST(HttpPath_Post_ListenAdd, n.httpHandler_ListenAdd)
+
 }
 
 func (n *Node) onInvokerClientLogin(invoker *rpc.Invoker, request *rpc.InvokeRequest) *rpc.InvokeResponse {
@@ -65,7 +123,7 @@ func (n *Node) onInvokerClientLogin(invoker *rpc.Invoker, request *rpc.InvokeReq
 		return rpc.NewErrorResponse(request.RequestId, errMsg)
 	}
 
-	loginReq := &rpc.ClientLoginRequest{}
+	loginReq := &rpc.LoginRequest{}
 	if !request.GetValue(loginReq) {
 		errMsg := "客户端登录失败,客户登录信息无效"
 		log.Println(errMsg)
@@ -119,12 +177,105 @@ func (n *Node) onWatcher_ClientOnline(eventType string, key string, prevValue, v
 	}
 }
 
+func (n *Node) successResponse(w http.ResponseWriter, value any) {
+	resp := utils.SuccessResponse(value)
+	w.WriteHeader(200)
+	bodyBytes := utils.GetJsonBytes(resp)
+	_, _ = io.Copy(w, bufio.NewReader(bytes.NewReader(bodyBytes)))
+}
+
+func (n *Node) errorResponse(w http.ResponseWriter, message string) {
+	resp := utils.ErrResponse(message)
+	w.WriteHeader(200)
+	bodyBytes := utils.GetJsonBytes(resp)
+	_, _ = io.Copy(w, bufio.NewReader(bytes.NewReader(bodyBytes)))
+}
+
+func (n *Node) getJsonValue(r *http.Request, v any) bool {
+	strBytes, _ := io.ReadAll(r.Body)
+	return utils.GetJsonValue(v, string(strBytes))
+}
+
+func (n *Node) httpHandler_DomainList(c echo.Context) error {
+	clientId := c.Param("clientId")
+	domainList := n.etcdOp.GetDomainList(clientId)
+	return c.JSON(200, utils.SuccessResponse(domainList))
+}
+
+func (n *Node) httpHandler_ListenAdd(c echo.Context) error {
+	req := &rpc.ListenRequest{}
+	err := c.Bind(req)
+	if err != nil {
+		return err
+	}
+
+	if req.ListenAddr == "" {
+		return c.JSON(200, utils.ErrResponse("ListenAddr不能为空"))
+	}
+
+	clientId := c.Request().Header.Get("Zhangyu-ClientId")
+
+	if req.ListenClientId != clientId {
+		return c.JSON(200, utils.ErrResponse(fmt.Sprintf("无效的客户端ID:%v", req.ListenClientId)))
+	}
+
+	if req.TargetTunnelId == "" {
+		return c.JSON(200, utils.ErrResponse("TargetClientId不能为空"))
+	}
+
+	tunnel := n.etcdOp.GetTunnel(req.TargetTunnelId)
+	if tunnel == nil {
+		return c.JSON(200, utils.ErrResponse(fmt.Sprintf("无效的客户端TunnelId:%v", req.TargetTunnelId)))
+	}
+
+	if tunnel.AuthCode != req.TargetAuthCode {
+		return c.JSON(200, utils.ErrResponse("AuthCode验证失败"))
+	}
+
+	n.etcdOp.AddListenWithTunnel(req.TargetTunnelId, req.ListenClientId, req.ListenAddr, req.TargetAddr)
+	return c.JSON(200, utils.SuccessResponse(nil))
+}
+
+func (n *Node) httpHandler_Login(c echo.Context) error {
+	loginReq := &rpc.LoginRequest{}
+	err := c.Bind(loginReq)
+	if err != nil {
+		return err
+	}
+
+	clientId := loginReq.ClientId
+	clientToken := loginReq.Token
+
+	if clientId != "" {
+		rec := n.etcdOp.GetClientRec(clientId)
+		if rec != nil && rec.Token == clientToken {
+			claim := &app.Claim{
+				LoginType: 2,
+				ClientId:  clientId,
+				StandardClaims: jwt.StandardClaims{
+					ExpiresAt: time.Now().Add(time.Hour).Unix(),
+					Id:        clientId,
+					Issuer:    "Zhangyu Node",
+					Subject:   "Client Login",
+				},
+			}
+			tokenStr, _ := app.CreateToken(claim, n.getJwtSignKey())
+			loginResp := &rpc.LoginResponse{
+				TokenString: tokenStr,
+			}
+			return c.JSON(200, utils.SuccessResponse(loginResp))
+
+		}
+	}
+	return c.JSON(200, utils.ErrResponse("当前客户端身份认证失败"))
+}
+
 func NewNode(ctx context.Context, etcdUri string, quicPort int) *Node {
 	re := &Node{QuicPort: quicPort}
 	re.SetCtx(ctx)
 	re.connectionId = uuid.New().String()
 	re.TerminalId = re.connectionId
-	re.quicSrv = quic.NewServer(re.Ctx(), quicPort, rpc.ServicePath, re)
+	re.quicSrv = srv.NewServer(re.Ctx(), quicPort, rpc.ServicePath, re)
 
 	endPoints := strings.Split(etcdUri, ",")
 	if len(endPoints) > 0 {
