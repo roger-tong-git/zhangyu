@@ -108,7 +108,7 @@ func (c *Client) Dial(addr string, connType string,
 		c.connected = true
 		invoker := c.invokeRoute.AddDialInvoker(c.invokeRoute.Ctx(), stream)
 		invoker.SetAttach("Session", session)
-		invoker.SetAttach("Conn", quic.NewConnWrapper(invoker.Ctx(), stream, session))
+		invoker.SetAttach("Conn", quic.NewConnWrapper(stream, session))
 		invoker.SetOnClose(func() {
 			_ = invoker.ReadWriter().Close()
 			_ = session.CloseWithError(0, "")

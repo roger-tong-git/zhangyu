@@ -208,6 +208,7 @@ func (c *Client) onInvoker_DialOut(_ *rpc.Invoker, request *rpc.InvokeRequest) {
 				conn := i.GetAttach("Conn").(net.Conn)
 				go func() {
 					_ = c.getSocksServer().ServeConn(conn)
+					_ = i.Close()
 				}()
 				break
 			case "tcp":
@@ -221,13 +222,13 @@ func (c *Client) onInvoker_DialOut(_ *rpc.Invoker, request *rpc.InvokeRequest) {
 	})
 }
 
-func NewClient(ctx context.Context, nodeAddr string) *Client {
-	re := &Client{NodeAddr: nodeAddr}
+func NewClient(ctx context.Context) *Client {
+	re := &Client{}
 	re.SetCtx(ctx)
 	utils.ReadJsonSetting("client.json", re, func() {
 		re.HeartBeatSeconds = 10
+		re.NodeAddr = "127.0.0.1:18888"
 	})
-	re.NodeAddr = nodeAddr
 	re.InitClient(re.TerminalId, re.Token)
 	return re
 }

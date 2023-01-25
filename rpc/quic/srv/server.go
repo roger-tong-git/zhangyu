@@ -42,6 +42,7 @@ type ServerAdapter interface {
 
 type Server struct {
 	quicPort     int
+	httpPort     int
 	quicPath     string
 	leaseSeconds int
 	invokeRoute  *rpc.InvokeRoute
@@ -151,7 +152,7 @@ func (s *Server) upgradeWebTransport(c echo.Context) error {
 	invoker.SetRemoteAddr(remoteAddr)
 	invoker.SetClientIP(utils.GetRealRemoteAddr(r))
 	invoker.SetAttach("Session", session)
-	invoker.SetAttach("Conn", quic.NewConnWrapper(invoker.Ctx(), stream, session))
+	invoker.SetAttach("Conn", quic.NewConnWrapper(stream, session))
 	invoker.SetReadErrorHandler(func(err error) {
 		_ = invoker.Close()
 	})
@@ -212,8 +213,8 @@ func (s *Server) RemoveRpcHandler(path string) {
 	s.invokeRoute.RemoveRpcHandler(path)
 }
 
-func NewServer(ctx context.Context, quicPort int, quicPath string, adapter ServerAdapter) *Server {
-	re := &Server{adapter: adapter, quicPort: quicPort, quicPath: quicPath}
+func NewServer(ctx context.Context, quicPort int, httpPort int, quicPath string, adapter ServerAdapter) *Server {
+	re := &Server{adapter: adapter, quicPort: quicPort, httpPort: httpPort, quicPath: quicPath}
 	re.SetCtx(ctx)
 	re.invokeRoute = rpc.NewInvokeRoute(re.Ctx())
 	re.invokeRoute.SetLeaseSeconds(re.LeaseSeconds())
@@ -250,8 +251,8 @@ func NewServer(ctx context.Context, quicPort int, quicPath string, adapter Serve
 	}()
 
 	go func() {
-		log.Println(fmt.Sprintf("HTTP[:%v]服务启动", quicPort))
-		_ = http.ListenAndServe(fmt.Sprintf(":%v", quicPort), re.httpRouter)
+		log.Println(fmt.Sprintf("HTTP[:%v]服务启动", httpPort))
+		_ = http.ListenAndServe(fmt.Sprintf(":%v", httpPort), re.httpRouter)
 	}()
 
 	return re

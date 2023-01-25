@@ -156,6 +156,7 @@ func (i *Invoker) Copy(target io.ReadWriteCloser) {
 	c := func(src, dst io.ReadWriteCloser) {
 		_, _ = io.Copy(dst, src)
 		_ = src.Close()
+		_ = dst.Close()
 	}
 
 	go c(i, target)

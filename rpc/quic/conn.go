@@ -1,15 +1,12 @@
 package quic
 
 import (
-	"context"
 	"github.com/marten-seemann/webtransport-go"
-	"github.com/roger-tong-git/zhangyu/utils"
 	"net"
 	"time"
 )
 
 type ConnWrapper struct {
-	utils.Closer
 	stream  webtransport.Stream
 	session *webtransport.Session
 }
@@ -42,8 +39,12 @@ func (c *ConnWrapper) SetWriteDeadline(t time.Time) error {
 	return c.stream.SetWriteDeadline(t)
 }
 
-func NewConnWrapper(ctx context.Context, stream webtransport.Stream, session *webtransport.Session) *ConnWrapper {
+func (c *ConnWrapper) Close() error {
+	_ = c.session.CloseWithError(0, "")
+	return c.stream.Close()
+}
+
+func NewConnWrapper(stream webtransport.Stream, session *webtransport.Session) *ConnWrapper {
 	re := &ConnWrapper{stream: stream, session: session}
-	re.SetCtx(ctx)
 	return re
 }

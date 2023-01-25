@@ -22,8 +22,10 @@ import (
 )
 
 type Node struct {
-	TerminalId    string `json:"-"` //设备ID
+	TerminalId    string
+	HttpPort      int
 	QuicPort      int
+	EtcdAddr      string
 	ClientTimeOut int
 	connectionId  string
 	quicSrv       *srv.Server
@@ -318,14 +320,26 @@ func (n *Node) onInvokerTransferGo(invoker *rpc.Invoker, request *rpc.InvokeRequ
 	}
 }
 
-func NewNode(ctx context.Context, etcdUri string, quicPort int) *Node {
-	re := &Node{QuicPort: quicPort}
+func NewNode(ctx context.Context) *Node {
+	re := &Node{}
+	utils.ReadJsonSetting("node.json", re, func() {
+		re.QuicPort = 18888
+		re.HttpPort = 18888
+		re.EtcdAddr = "127.0.0.1:2379"
+		re.TerminalId = uuid.New().String()
+	})
+
 	re.SetCtx(ctx)
 	re.connectionId = uuid.New().String()
-	re.TerminalId = re.connectionId
-	re.quicSrv = srv.NewServer(re.Ctx(), quicPort, rpc.ServicePath, re)
+	if re.QuicPort == 0 {
+		re.QuicPort = 18888
+	}
+	if re.HttpPort == 0 {
+		re.HttpPort = 18888
+	}
+	re.quicSrv = srv.NewServer(re.Ctx(), re.QuicPort, re.HttpPort, rpc.ServicePath, re)
 
-	endPoints := strings.Split(etcdUri, ",")
+	endPoints := strings.Split(re.EtcdAddr, ",")
 	if len(endPoints) > 0 {
 		addr := endPoints[0]
 		localIP := ""
@@ -336,8 +350,8 @@ func NewNode(ctx context.Context, etcdUri string, quicPort int) *Node {
 			log.Panicln("etcd服务地址不正确")
 		}
 
-		re.etcdOp = etcd.NewEtcdOp(re.Ctx(), etcdUri)
-		nodeAddr := fmt.Sprintf("%v:%v", localIP, quicPort)
+		re.etcdOp = etcd.NewEtcdOp(re.Ctx(), re.EtcdAddr)
+		nodeAddr := fmt.Sprintf("%v:%v", localIP, re.QuicPort)
 		nodeInfo := &rpc.NodeInfo{NodeAddr: nodeAddr}
 		nodeInfo.TerminalId = re.TerminalId
 		nodeInfo.ConnectionId = re.connectionId

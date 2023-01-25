@@ -16,7 +16,7 @@ func main() {
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
 	rand.Intn(time.Now().Nanosecond())
 	ctx := context.Background()
-	sNode := node.NewNode(ctx, "127.0.0.1:2379", 18888)
+	sNode := node.NewNode(ctx)
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
