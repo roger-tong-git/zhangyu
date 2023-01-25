@@ -37,12 +37,21 @@ func (n *Node) getJwtSignKey() string {
 	return n.jwtSingKey
 }
 
-func (n *Node) ConnectionIn(connId string, connType rpc.ConnectionType, invoker *rpc.Invoker) {
-
+func (n *Node) ConnectionIn(connType rpc.ConnectionType, invoker *rpc.Invoker) {
+	if connType == rpc.ConnectionType_Listen ||
+		connType == rpc.ConnectionType_Target {
+		req, _, _ := invoker.ReadInvoke()
+		handler := n.quicSrv.InvokeRoute().GetUniHandler(req.Path)
+		handler(invoker, req)
+	}
 }
 
 func (n *Node) GetInvoker(terminalId string) *rpc.Invoker {
-	return n.quicSrv.InvokeRoute().GetInvoker(terminalId)
+	onlineRec := n.etcdOp.GetOnlineClient(terminalId)
+	if onlineRec != nil {
+		return n.quicSrv.InvokeRoute().GetInvoker(onlineRec.InvokerId)
+	}
+	return nil
 }
 
 func (n *Node) GetContext(terminalId string) context.Context {
@@ -102,6 +111,10 @@ func (n *Node) verifyToken() echo.MiddlewareFunc {
 
 func (n *Node) init() {
 	n.quicSrv.AddRpcHandler(rpc.InvokePath_Client_Login, n.onInvokerClientLogin)
+	n.quicSrv.AddRpcHandler(rpc.InvokePath_Client_TransferList, n.onInvokerTransferList)
+	n.quicSrv.AddUniHandler(rpc.InvokePath_Transfer_ListenIn, n.onInvokerListenIn)
+	n.quicSrv.AddUniHandler(rpc.InvokePath_Transfer_Go, n.onInvokerTransferGo)
+
 	n.etcdOp.AddWatcher(fmt.Sprintf(etcd.Key_ClientOnline, ""), n.onWatcher_ClientOnline)
 
 	n.POST(HttpPath_Post_Login, n.httpHandler_Login)
@@ -268,6 +281,41 @@ func (n *Node) httpHandler_Login(c echo.Context) error {
 		}
 	}
 	return c.JSON(200, utils.ErrResponse("当前客户端身份认证失败"))
+}
+
+func (n *Node) onInvokerTransferList(invoker *rpc.Invoker, request *rpc.InvokeRequest) *rpc.InvokeResponse {
+	clientId := invoker.TerminalId()
+	re := rpc.NewInvokeResponse(request.RequestId, rpc.InvokeResult_Success, "")
+	re.PutValue(n.etcdOp.GetTransferList(clientId))
+	return re
+}
+
+// Listen 端有连接进入，将Listen信息转发到Target端
+func (n *Node) onInvokerListenIn(invoker *rpc.Invoker, request *rpc.InvokeRequest) {
+	listen := &rpc.Listen{}
+	if request.GetValue(listen) {
+		tunnel := n.etcdOp.GetTunnel(listen.TargetTunnelId)
+		targetCmdInvoker := n.GetInvoker(tunnel.TerminalId)
+		if targetCmdInvoker != nil {
+			request.Path = rpc.InvokePath_Transfer_TargetIn
+			request.Header["ListenInvokerId"] = invoker.InvokerId()
+			request.Header["ListenClientId"] = invoker.TerminalId()
+			go func() {
+				if targetCmdInvoker.WriteRequest(request) != nil {
+					_ = targetCmdInvoker.Close()
+					_ = invoker.Close()
+				}
+			}()
+		}
+	}
+}
+
+func (n *Node) onInvokerTransferGo(invoker *rpc.Invoker, request *rpc.InvokeRequest) {
+	listenInvokerId := request.Header["ListenInvokerId"]
+	listenInvoker := n.quicSrv.InvokeRoute().GetInvoker(listenInvokerId)
+	if listenInvoker != nil {
+		invoker.Copy(listenInvoker)
+	}
 }
 
 func NewNode(ctx context.Context, etcdUri string, quicPort int) *Node {

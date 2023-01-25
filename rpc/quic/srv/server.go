@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/lucas-clemente/quic-go/http3"
@@ -27,7 +26,7 @@ import (
 // ServerAdapter 服务适配接口
 type ServerAdapter interface {
 	// ConnectionIn 连接进入时的处理过程
-	ConnectionIn(connId string, connType rpc.ConnectionType, invoker *rpc.Invoker)
+	ConnectionIn(connType rpc.ConnectionType, invoker *rpc.Invoker)
 
 	// GetInvoker 取得终端ID对应的Invoker，存在跨服务端的情况
 	GetInvoker(terminalId string) *rpc.Invoker
@@ -153,10 +152,10 @@ func (s *Server) upgradeWebTransport(c echo.Context) error {
 	invoker.SetClientIP(utils.GetRealRemoteAddr(r))
 	invoker.SetAttach("Session", session)
 	invoker.SetAttach("Conn", quic.NewConnWrapper(invoker.Ctx(), stream, session))
-	invoker.SetReadErrorHandler(func(_ error) {
+	invoker.SetReadErrorHandler(func(err error) {
 		_ = invoker.Close()
 	})
-	invoker.SetWriteErrorHandler(func(_ error) {
+	invoker.SetWriteErrorHandler(func(err error) {
 		_ = invoker.Close()
 	})
 	invoker.SetOnClose(func() {
@@ -164,7 +163,6 @@ func (s *Server) upgradeWebTransport(c echo.Context) error {
 		_ = session.CloseWithError(0, "")
 		s.invokeRoute.RemoveInvoker(invokerId)
 		if isCmdTrans {
-			s.adapter.OnCloseClient(invoker)
 			s.adapter.OnCloseClient(invoker)
 			log.Println(fmt.Sprintf("已关闭客户端[%v]连接", invokerId))
 		}
@@ -182,12 +180,12 @@ func (s *Server) upgradeWebTransport(c echo.Context) error {
 	}
 
 	if isCmdTrans {
-		log.Println(fmt.Sprintf("客户端[%v]已连接到Quic服务", invoker.TerminalId()))
-		s.invokeRoute.SetExpire(invokerId, time.Second*30)
+		log.Println(fmt.Sprintf("客户端[%v|%v]已连接到Quic服务", invoker.TerminalId(), invoker.InvokerId()))
+
 		s.invokeRoute.DispatchInvoke(invoker)
 	} else {
 		// 非命令通道，为了推动Accept，通道连接后，会发布一个Accept推动字节，通道首个字节为88
-		s.adapter.ConnectionIn(invokerId, connectionType, invoker)
+		s.adapter.ConnectionIn(connectionType, invoker)
 	}
 	return nil
 }
@@ -227,7 +225,6 @@ func NewServer(ctx context.Context, quicPort int, quicPath string, adapter Serve
 		Certificates: certs,
 	}
 
-	gin.SetMode(gin.ReleaseMode)
 	re.httpRouter = echo.New()
 	re.httpRouter.Any(quicPath, re.upgradeWebTransport)
 

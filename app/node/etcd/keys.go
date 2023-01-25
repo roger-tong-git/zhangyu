@@ -57,5 +57,5 @@ const (
 	Key_ClientOnline = "/zhangyu/client/online/%v"
 	Key_ClientTunnel = "/zhangyu/client/tunnel/%v"
 	Key_ClientRecord = "/zhangyu/client/record/%v"
-	Key_ClientListen = "/zhangyu/client/listen/%v/[%v]"
+	Key_ClientListen = "/zhangyu/client/listen/%v=>%v"
 )

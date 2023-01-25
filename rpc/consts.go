@@ -16,17 +16,17 @@ const (
 )
 
 const (
-	InvokePath_Transfer_Dial        = "/transfer/dial"
-	InvokePath_Transfer_Go          = "/transfer/go"
-	InvokePath_Transfer_Listen      = "/transfer/listen"
-	InvokePath_Transfer_Disconnect  = "/transfer/disconnect"
-	InvokePath_Client_Kick          = "/client/kick"
-	InvokePath_Client_SetId         = "/client/connection/id"
-	InvokePath_Client_New           = "/client/record/new"
-	InvokePath_Client_Register      = "/client/register"
-	InvokePath_Client_Login         = "/client/login"
-	InvokePath_Client_Heartbeat     = "/client/heartbeat"
-	InvokePath_Client_Transfer_List = "/client/transfer/list"
+	InvokePath_Transfer_Go         = "/transfer/go"
+	InvokePath_Transfer_ListenIn   = "/transfer/listen/in"
+	InvokePath_Transfer_TargetIn   = "/transfer/target/in"
+	InvokePath_Transfer_Disconnect = "/transfer/disconnect"
+	InvokePath_Client_Kick         = "/client/kick"
+	InvokePath_Client_SetId        = "/client/connection/id"
+	InvokePath_Client_New          = "/client/record/new"
+	InvokePath_Client_Register     = "/client/register"
+	InvokePath_Client_Login        = "/client/login"
+	InvokePath_Client_Heartbeat    = "/client/heartbeat"
+	InvokePath_Client_TransferList = "/client/transfer/list"
 )
 
 const (
@@ -42,8 +42,8 @@ const (
 )
 
 const (
-	ConnectionType_Command = "Command"       //命令连接
-	ConnectionType_From    = "Instance_From" //流量连接
+	ConnectionType_Command = "Command"         //命令连接
+	ConnectionType_Listen  = "Instance_Listen" //流量连接
 	ConnectionType_Target  = "Instance_Target"
 )
 

@@ -2,8 +2,8 @@ package rpc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/google/uuid"
@@ -141,19 +141,25 @@ func (i *Invoker) Write(p []byte) (n int, err error) {
 }
 
 func (i *Invoker) Copy(target io.ReadWriteCloser) {
-	copyChan := make(chan bool)
+	if i.isCommandTunnel {
+		log.Println("不能在command通道执行copy")
+		return
+	}
+
+	if v, ok := target.(*Invoker); ok {
+		if v.isCommandTunnel {
+			log.Println("不能在command通道执行copy")
+			return
+		}
+	}
 
 	c := func(src, dst io.ReadWriteCloser) {
 		_, _ = io.Copy(dst, src)
-		copyChan <- true
+		_ = src.Close()
 	}
 
 	go c(i, target)
 	go c(target, i)
-
-	<-copyChan
-	_ = i.Close()
-	_ = target.Close()
 }
 
 func (i *Invoker) IsCommandTunnel() bool {
@@ -206,28 +212,49 @@ func (i *Invoker) WriteResponse(response *InvokeResponse) error {
 	return i.writeInvokeData("2", response)
 }
 
-func (i *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
+func (i *Invoker) readInvokeStr() (string, error) {
 	defer i.readerLock.Unlock()
 	i.readerLock.Lock()
 
-	str, err := bufio.NewReader(i.readWriter).ReadString('\n')
+	lenBytes := make([]byte, 8)
+	_, err := io.ReadFull(i.readWriter, lenBytes)
 	if err != nil {
-		if i.readErrorHandler != nil {
-			i.readErrorHandler(err)
-		}
+		return "", err
+	}
+	l := utils.BytesToInt(lenBytes)
+	strBytes := make([]byte, l)
+	_, err = io.ReadFull(i.readWriter, strBytes)
+	if err != nil {
+		return "", err
+	}
+	return string(strBytes), nil
+	//
+	//
+	//
+	//str, err := bufio.NewReader(i.readWriter).ReadString('\n')
+	//if err != nil {
+	//	if i.readErrorHandler != nil {
+	//		i.readErrorHandler(err)
+	//	}
+	//	return "", err
+	//}
+	//
+	//if bytes, deErr := base64.StdEncoding.DecodeString(str); deErr != nil {
+	//	if i.readErrorHandler != nil {
+	//		go i.readErrorHandler(deErr)
+	//	}
+	//	return "", deErr
+	//} else {
+	//	str = string(bytes)
+	//}
+	//return str, err
+}
+
+func (i *Invoker) ReadInvoke() (*InvokeRequest, *InvokeResponse, error) {
+	str, err := i.readInvokeStr()
+	if err != nil {
 		return nil, nil, err
 	}
-
-	if bytes, deErr := base64.StdEncoding.DecodeString(str); deErr != nil {
-		if i.readErrorHandler != nil {
-			i.readErrorHandler(deErr)
-		}
-		log.Println("base64解码失败")
-		return nil, nil, deErr
-	} else {
-		str = string(bytes)
-	}
-
 	v := &map[string]any{}
 	utils.GetJsonValue(v, str)
 	invType := (*v)["type"].(string)
@@ -300,28 +327,22 @@ func (i *Invoker) writeInvokeData(invType string, invokeData any) error {
 	writeMap := map[string]any{}
 	writeMap["type"] = invType
 	writeMap["data"] = invokeData
-	writeBytes := utils.GetJsonBytes(writeMap)
-	sWriter := bufio.NewWriter(i.readWriter)
-	enStr := base64.StdEncoding.EncodeToString(writeBytes)
+	mapBytes := utils.GetJsonBytes(writeMap)
+	writeBytes := utils.IntToBytes(len(mapBytes))
+	writeBytes = append(writeBytes, mapBytes...)
 
-	defer i.writerLock.Unlock()
 	i.writerLock.Lock()
+	_, err := io.Copy(i.readWriter, bufio.NewReader(bytes.NewReader(writeBytes)))
+	i.writerLock.Unlock()
 
-	_, err := sWriter.WriteString(enStr + "\n")
 	if err != nil {
 		if i.writeErrorHandler != nil {
-			i.writeErrorHandler(err)
+			go i.writeErrorHandler(err)
 		}
 		log.Println("Write Error:", writeMap)
 		return err
 	}
 
-	err = sWriter.Flush()
-	if err != nil {
-		if i.writeErrorHandler != nil {
-			i.writeErrorHandler(err)
-		}
-	}
 	return err
 }
 
@@ -359,6 +380,7 @@ func NewInvokeRoute(ctx context.Context) *InvokeRoute {
 	re.invokes = utils.NewCache[*Invoker](re.Ctx())
 	re.invokes.SetExpireHandler(func(key string, value any) {
 		if v, ok := value.(*Invoker); ok {
+			log.Println("------------Invoker.Close By SetExpireHandler")
 			_ = v.Close()
 		}
 	})
@@ -376,8 +398,8 @@ func (r *InvokeRoute) getLeaseDuration() time.Duration {
 
 func (r *InvokeRoute) AddAcceptInvoker(invokerId string, terminalId string, ctx context.Context, readWriter io.ReadWriteCloser) *Invoker {
 	invoker := NewInvoker(ctx, invokerId, terminalId, readWriter)
-	r.invokes.Set(invokerId, invoker)
 	_, _ = bufio.NewReader(invoker.readWriter).ReadByte()
+	r.invokes.Set(invokerId, invoker)
 	return invoker
 }
 
@@ -483,9 +505,6 @@ func (r *InvokeRoute) DispatchInvoke(invoker *Invoker) {
 			}
 
 			if req != nil {
-				if invoker.IsCommandTunnel() {
-					r.SetExpire(invoker.invokerId, r.getLeaseDuration())
-				}
 				uniHandler := r.GetUniHandler(req.Path)
 				if uniHandler != nil {
 					go uniHandler(invoker, req)

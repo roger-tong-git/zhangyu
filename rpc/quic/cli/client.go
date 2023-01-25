@@ -143,10 +143,10 @@ func (c *Client) ConnectTo() error {
 			invoker.SetIsCommandTunnel(true)
 			c.adapter.SetConnectionId(invoker.InvokerId())
 			c.adapter.SetTerminalId(invoker.TerminalId())
-			invoker.SetWriteErrorHandler(func(_ error) {
+			invoker.SetWriteErrorHandler(func(err error) {
 				c.connected = false
 			})
-			invoker.SetReadErrorHandler(func(_ error) {
+			invoker.SetReadErrorHandler(func(err error) {
 				c.connected = false
 			})
 			go c.invokeRoute.DispatchInvoke(invoker)

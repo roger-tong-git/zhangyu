@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,6 +48,20 @@ func ByteArrayToInt(arr []byte) int64 {
 
 func newLogFileWriter(filePrefix string) *logFileWriter {
 	return &logFileWriter{filePrefix: filePrefix}
+}
+
+func IntToBytes(n int) []byte {
+	data := int64(n)
+	buffer := bytes.NewBuffer([]byte{})
+	_ = binary.Write(buffer, binary.BigEndian, data)
+	return buffer.Bytes()
+}
+
+func BytesToInt(bys []byte) int {
+	buffer := bytes.NewBuffer(bys)
+	var data int64
+	_ = binary.Read(buffer, binary.BigEndian, &data)
+	return int(data)
 }
 
 func (l *logFileWriter) Write(p []byte) (n int, err error) {

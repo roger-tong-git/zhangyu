@@ -10,3 +10,5 @@ front.json
 cmd/client/client
 cmd/node/server.key
 cmd/node/server.pem
+cmd/node/server.pem
+cmd/node/server.key

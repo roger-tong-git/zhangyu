@@ -369,3 +369,15 @@ func (s *Client) AddListenWithTunnel(targetTunnelId, listenClientId, listenAddr,
 	}
 	_, _ = s.PutValue(s.getListenKey(listen), listen)
 }
+
+func (s *Client) GetTransferList(clientId string) []*rpc.Listen {
+	prefixKey := fmt.Sprintf(Key_ClientListen, clientId, "")
+	listenList := make([]*rpc.Listen, 0)
+	s.GetArray(prefixKey, func(jsonValue string) {
+		listen := &rpc.Listen{}
+		if utils.GetJsonValue(listen, jsonValue) {
+			listenList = append(listenList, listen)
+		}
+	})
+	return listenList
+}
