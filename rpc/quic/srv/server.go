@@ -85,11 +85,11 @@ func (s *Server) generateTLSConfig() {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 
-	keyFile, _ := os.Create("server.key")
+	keyFile, _ := os.Create("node.key")
 	_, _ = keyFile.Write(keyPEM)
 	_ = keyFile.Close()
 
-	crtFile, _ := os.Create("server.pem")
+	crtFile, _ := os.Create("node.pem")
 	_, _ = crtFile.Write(certPEM)
 	_ = crtFile.Close()
 }
@@ -221,7 +221,7 @@ func NewServer(ctx context.Context, quicPort int, httpPort int, quicPath string,
 	re.generateTLSConfig()
 
 	certs := make([]tls.Certificate, 1)
-	certs[0], _ = tls.LoadX509KeyPair("server.pem", "server.key")
+	certs[0], _ = tls.LoadX509KeyPair("node.pem", "node.key")
 	tlsConfig := &tls.Config{
 		Certificates: certs,
 	}
