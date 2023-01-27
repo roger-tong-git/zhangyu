@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"github.com/roger-tong-git/zhangyu/app/client"
+	"github.com/roger-tong-git/zhangyu/utils"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -13,6 +14,7 @@ import (
 )
 
 func main() {
+	defer utils.PrintError()
 	ctx := context.Background()
 	cli := client.NewClient(ctx)
 	go func() {

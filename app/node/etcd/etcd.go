@@ -11,63 +11,23 @@ import (
 	"go.uber.org/zap"
 	"log"
 	rand2 "math/rand"
+	"net/url"
 	"strings"
 	"time"
 )
 
 type Client struct {
 	EtcdUri  string //Etcd连接字符串
+	Domain   string //提供http服务的域名
 	etcdCli  *clientv3.Client
 	nodeInfo *rpc.NodeInfo
 	utils.Closer
 }
 
-type Mutex struct {
-	Ttl     int64  //租约时间
-	Key     string //etcd的key
-	lease   clientv3.Lease
-	leaseID clientv3.LeaseID
-	client  *clientv3.Client
-	txn     clientv3.Txn
-	utils.Closer
-}
-
-func (em *Mutex) UnLock() {
-	_, _ = em.lease.Revoke(em.Ctx(), em.leaseID)
-	_, _ = em.client.Delete(em.Ctx(), em.Key)
-}
-
-func (em *Mutex) Lock() bool {
-	em.txn.If(clientv3.Compare(clientv3.CreateRevision(em.Key), "=", 0)).
-		Then(clientv3.OpPut(em.Key, "", clientv3.WithLease(em.leaseID))).
-		Else()
-	txnResp, err := em.txn.Commit()
-	if err != nil {
-		log.Println(err)
-		return false
-	}
-	return txnResp.Succeeded
-}
-
-func NewEtcdMutex(ctx context.Context, client *clientv3.Client, key string, ttl int64) (*Mutex, error) {
-	var err error
-	em := &Mutex{client: client, Key: key, Ttl: ttl}
-	em.SetCtx(ctx)
-	em.SetOnClose(em.UnLock)
-	em.txn = clientv3.NewKV(em.client).Txn(em.Ctx())
-	em.lease = clientv3.NewLease(em.client)
-	leaseResp, err := em.lease.Grant(em.Ctx(), em.Ttl)
-	if err != nil {
-		return nil, err
-	}
-	em.leaseID = leaseResp.ID
-	_, err = em.lease.KeepAlive(ctx, em.leaseID)
-	return em, err
-}
-
-func NewEtcdOp(ctx context.Context, etcdUri string) *Client {
+func NewEtcdOp(ctx context.Context, etcdUri string, domain string) *Client {
 	op := &Client{
 		EtcdUri: etcdUri,
+		Domain:  domain,
 	}
 
 	op.SetCtx(ctx)
@@ -219,6 +179,10 @@ func (s *Client) getDomainKey(clientId string, domain string) string {
 	return fmt.Sprintf(Key_Domain, clientId, domain)
 }
 
+func (s *Client) getDomainNameKey(domain string) string {
+	return fmt.Sprintf(Key_DomainName, domain)
+}
+
 func (s *Client) RegisterNode(info *rpc.NodeInfo) {
 	s.nodeInfo = info
 
@@ -256,6 +220,19 @@ func (s *Client) GenerateTunnelId() string {
 		tunnelId := fmt.Sprintf("%d", tmpInt)
 		if s.lock(s.getTunnelKey(tunnelId), 5) {
 			return tunnelId
+		}
+	}
+}
+
+func (s *Client) GenerateDomainName() string {
+	for {
+		tmpInt := rand2.Int63n(999999)
+		if tmpInt < 100000 {
+			tmpInt = tmpInt + 100000
+		}
+		domainName := fmt.Sprintf("c%d.%v", tmpInt, s.Domain)
+		if s.lock(s.getDomainNameKey(domainName), 5) {
+			return domainName
 		}
 	}
 }
@@ -350,7 +327,7 @@ func (s *Client) GetDomainList(clientId string) []*rpc.Domain {
 	return domainList
 }
 
-func (s *Client) AddListenWithTunnel(targetTunnelId, listenClientId, listenAddr, targetAddr string) {
+func (s *Client) AddListenWithTunnel(targetTunnelId, listenClientId, listenAddr, targetAddr string) *rpc.Listen {
 	listen := &rpc.Listen{
 		ListenClientId: listenClientId,
 		TargetTunnelId: targetTunnelId,
@@ -368,6 +345,15 @@ func (s *Client) AddListenWithTunnel(targetTunnelId, listenClientId, listenAddr,
 		listen.TargetClientId = targetTunnel.TerminalId
 	}
 	_, _ = s.PutValue(s.getListenKey(listen), listen)
+
+	if targetAddr != "" {
+		targetUrl, _ := url.Parse(targetAddr)
+		if targetUrl.Scheme == "http" || targetUrl.Scheme == "https" {
+			_, _ = s.PutValue(s.getDomainNameKey(listenAddr), listen)
+		}
+	}
+
+	return listen
 }
 
 func (s *Client) GetTransferList(clientId string) []*rpc.Listen {
@@ -380,4 +366,13 @@ func (s *Client) GetTransferList(clientId string) []*rpc.Listen {
 		}
 	})
 	return listenList
+}
+
+func (s *Client) GetDomainInfo(domainName string) *rpc.Listen {
+	domainKey := s.getDomainNameKey(domainName)
+	listen := &rpc.Listen{}
+	if s.GetJsonValue(domainKey, listen) {
+		return listen
+	}
+	return nil
 }

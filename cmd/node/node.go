@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"github.com/roger-tong-git/zhangyu/app/node"
+	"github.com/roger-tong-git/zhangyu/utils"
 	"golang.org/x/exp/rand"
 	"log"
+	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
@@ -13,6 +15,11 @@ import (
 )
 
 func main() {
+	defer utils.PrintError()
+	go func() {
+		_ = http.ListenAndServe("0.0.0.0:6070", nil)
+	}()
+
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
 	rand.Intn(time.Now().Nanosecond())
 	ctx := context.Background()

@@ -18,27 +18,20 @@ const (
 const (
 	InvokePath_Transfer_Go         = "/transfer/go"
 	InvokePath_Transfer_ListenIn   = "/transfer/listen/in"
-	InvokePath_Transfer_TargetIn   = "/transfer/target/in"
-	InvokePath_Transfer_Disconnect = "/transfer/disconnect"
+	InvokePath_Transfer_ListenAdd  = "/transfer/listen/add"
+	InvokePath_Transfer_ListenDel  = "/transfer/listen/del"
+	InvokePath_Transfer_TargetOut  = "/transfer/target/out"
 	InvokePath_Client_Kick         = "/client/kick"
 	InvokePath_Client_SetId        = "/client/connection/id"
 	InvokePath_Client_New          = "/client/record/new"
-	InvokePath_Client_Register     = "/client/register"
 	InvokePath_Client_Login        = "/client/login"
 	InvokePath_Client_Heartbeat    = "/client/heartbeat"
 	InvokePath_Client_TransferList = "/client/transfer/list"
 )
 
 const (
-	HeadKey_TerminalId            = "Zhangyu-TerminalId"
-	HeadKey_TunnelId              = "Zhangyu-TunnelId"
-	HeadKey_Connection_Id         = "Zhangyu-Connection-Id"         //当前连接ID
 	HeadKey_Connection_TerminalId = "Zhangyu-Connection-TerminalId" //当前连接对应的终端ID
 	HeadKey_Connection_Type       = "Zhangyu-Connection-Type"       //连接类型
-)
-
-const (
-	HttpPath_Transfer_Add = "/_zhangyu/transfer/add"
 )
 
 const (

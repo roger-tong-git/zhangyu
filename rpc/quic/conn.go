@@ -2,6 +2,7 @@ package quic
 
 import (
 	"github.com/marten-seemann/webtransport-go"
+	"github.com/roger-tong-git/zhangyu/rpc"
 	"net"
 	"time"
 )
@@ -9,6 +10,7 @@ import (
 type ConnWrapper struct {
 	stream  webtransport.Stream
 	session *webtransport.Session
+	invoker *rpc.Invoker
 }
 
 func (c *ConnWrapper) Read(b []byte) (n int, err error) {
@@ -41,10 +43,11 @@ func (c *ConnWrapper) SetWriteDeadline(t time.Time) error {
 
 func (c *ConnWrapper) Close() error {
 	_ = c.session.CloseWithError(0, "")
-	return c.stream.Close()
+	_ = c.stream.Close()
+	return c.invoker.Close()
 }
 
-func NewConnWrapper(stream webtransport.Stream, session *webtransport.Session) *ConnWrapper {
-	re := &ConnWrapper{stream: stream, session: session}
+func NewConnWrapper(stream webtransport.Stream, session *webtransport.Session, invoker *rpc.Invoker) *ConnWrapper {
+	re := &ConnWrapper{stream: stream, session: session, invoker: invoker}
 	return re
 }

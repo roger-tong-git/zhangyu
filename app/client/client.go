@@ -24,7 +24,7 @@ type Client struct {
 	ConnectionId     string `json:"-"`
 	client           *cli.Client
 	utils.Closer     `json:"-"`
-	listenInited     bool
+	listenStarted    bool
 	socks5Srv        *socks5.Server
 }
 
@@ -48,20 +48,14 @@ func (c *Client) Invoke(request *rpc.InvokeRequest) (*rpc.InvokeResponse, error)
 	return c.client.DefaultInvoker().Invoke(request)
 }
 
-func (c *Client) AddListen(listen *rpc.Listen) {
+func (c *Client) TcpListen(listen *rpc.Listen) {
 	listenUrl, _ := url.Parse(listen.ListenAddr)
-	scheme := listenUrl.Scheme
-
-	if scheme == "socks5" {
-		scheme = "tcp"
-	}
-
-	listener, e := net.Listen(scheme, listenUrl.Host)
+	listener, e := net.Listen("tcp", listenUrl.Host)
 	if e != nil {
-		log.Printf("打开监听端口[%v]失败", listenUrl.Host)
+		log.Printf("打开监听端口[%v]失败:%v", listenUrl.Host, e)
 		return
 	} else {
-		log.Println(fmt.Sprintf("已打开监听端口[%v]", listenUrl.Host))
+		log.Println(fmt.Sprintf("已打开监听端口[%v]=>[%v|%v]", listenUrl.String(), listen.TargetTunnelId, listen.TargetAddr))
 	}
 
 	go func() {
@@ -92,11 +86,88 @@ func (c *Client) AddListen(listen *rpc.Listen) {
 	}()
 }
 
+func (c *Client) UdpListen(listen *rpc.Listen) {
+	listenUrl, _ := url.Parse(listen.ListenAddr)
+	udpAddr, _ := net.ResolveUDPAddr("udp", listenUrl.Host)
+	conn, e := net.ListenUDP("udp", udpAddr)
+	if e != nil {
+		log.Printf("打开监听端口[%v]失败:%v", listenUrl.Host, e)
+		return
+	} else {
+		log.Println(fmt.Sprintf("已打开监听端口[%v]=>[%v|%v]", listenUrl.String(), listen.TargetTunnelId, listen.TargetAddr))
+	}
+
+	//conn.wr
+
+	go func() {
+		err := c.client.Dial(c.getServerAddr(), rpc.ConnectionType_Listen, func(i *rpc.Invoker, session *webtransport.Session) {
+			req := rpc.NewInvokeRequest(rpc.InvokePath_Transfer_ListenIn)
+			req.PutValue(listen)
+			if i.WriteRequest(req) != nil {
+				_ = i.Close()
+			}
+			i.Copy(conn)
+		})
+
+		if err != nil {
+			log.Println(err)
+		}
+
+	}()
+
+	//go func() {
+	//	for {
+	//		var conn net.Conn
+	//		var err error
+	//		conn, err = listener.Accept()
+	//		if err != nil {
+	//			log.Println(err.Error())
+	//			continue
+	//		}
+	//
+	//		go func() {
+	//			err = c.client.Dial(c.getServerAddr(), rpc.ConnectionType_Listen, func(i *rpc.Invoker, session *webtransport.Session) {
+	//				req := rpc.NewInvokeRequest(rpc.InvokePath_Transfer_ListenIn)
+	//				req.PutValue(listen)
+	//				if i.WriteRequest(req) != nil {
+	//					_ = i.Close()
+	//				}
+	//				i.Copy(conn)
+	//			})
+	//
+	//			if err != nil {
+	//				log.Println(err)
+	//			}
+	//		}()
+	//	}
+	//}()
+}
+
+func (c *Client) AddListen(listen *rpc.Listen) {
+	listenUrl, _ := url.Parse(listen.ListenAddr)
+	scheme := listenUrl.Scheme
+
+	if scheme == "" || scheme == "http" || scheme == "https" {
+		return
+	}
+
+	if scheme == "socks5" {
+		scheme = "tcp"
+	}
+
+	if scheme == "tcp" {
+		c.TcpListen(listen)
+	}
+	//if scheme == "udp" {
+	//	c.UdpListen(listen)
+	//}
+}
+
 func (c *Client) OnConnected(invoker *rpc.Invoker) {
 	if c.Token != "" && c.TerminalId != "" {
 		c.login()
 
-		if !c.listenInited {
+		if !c.listenStarted {
 			req := rpc.NewInvokeRequest(rpc.InvokePath_Client_TransferList)
 			resp, _ := c.Invoke(req)
 
@@ -106,7 +177,7 @@ func (c *Client) OnConnected(invoker *rpc.Invoker) {
 					go c.AddListen(listen)
 				}
 			}
-			c.listenInited = true
+			c.listenStarted = true
 		}
 	}
 }
@@ -137,7 +208,8 @@ func (c *Client) InitClient(terminalId, token string) {
 	_ = c.client.ConnectTo()
 
 	c.client.InvokeRoute().AddUniHandler(rpc.InvokePath_Client_Kick, c.onInvoker_Kick)
-	c.client.InvokeRoute().AddUniHandler(rpc.InvokePath_Transfer_TargetIn, c.onInvoker_DialOut)
+	c.client.InvokeRoute().AddUniHandler(rpc.InvokePath_Transfer_TargetOut, c.onInvoker_DialOut)
+	c.client.InvokeRoute().AddUniHandler(rpc.InvokePath_Transfer_ListenAdd, c.onInvoker_ListenAdd)
 }
 
 func (c *Client) login() {
@@ -183,13 +255,17 @@ func (c *Client) onInvoker_DialOut(_ *rpc.Invoker, request *rpc.InvokeRequest) {
 		listenUrl, _ := url.Parse(listen.ListenAddr)
 		targetUrl, _ := url.Parse(listen.TargetAddr)
 		rawScheme := listenUrl.Scheme
+		if rawScheme == "" {
+			rawScheme = targetUrl.Scheme
+		}
+
 		rawHost := targetUrl.Host
 		host := rawHost
 		scheme := rawScheme
 		if scheme == "http" || scheme == "https" {
 			scheme = "tcp"
 			if listenUrl.Port() == "" {
-				switch scheme {
+				switch rawScheme {
 				case "http":
 					host = host + ":80"
 					break
@@ -202,7 +278,7 @@ func (c *Client) onInvoker_DialOut(_ *rpc.Invoker, request *rpc.InvokeRequest) {
 
 		request.Path = rpc.InvokePath_Transfer_Go
 		request.JsonBody = ""
-		if i.WriteRequest(request) == nil {
+		if wErr := i.WriteRequest(request); wErr == nil {
 			switch scheme {
 			case "socks5":
 				conn := i.GetAttach("Conn").(net.Conn)
@@ -217,9 +293,27 @@ func (c *Client) onInvoker_DialOut(_ *rpc.Invoker, request *rpc.InvokeRequest) {
 					_ = i.Close()
 				}
 				go i.Copy(conn)
+				break
+			case "udp":
+				conn, err := net.Dial("udp", host)
+				if err != nil {
+					_ = i.Close()
+				}
+				go i.Copy(conn)
+				break
 			}
+		} else {
+			_ = i.Close()
 		}
 	})
+}
+
+func (c *Client) onInvoker_ListenAdd(_ *rpc.Invoker, request *rpc.InvokeRequest) {
+	listen := &rpc.Listen{}
+	canNext := request.GetValue(listen)
+	if canNext {
+		c.AddListen(listen)
+	}
 }
 
 func NewClient(ctx context.Context) *Client {
@@ -227,7 +321,7 @@ func NewClient(ctx context.Context) *Client {
 	re.SetCtx(ctx)
 	utils.ReadJsonSetting("client.json", re, func() {
 		re.HeartBeatSeconds = 10
-		re.NodeAddr = "127.0.0.1:18888"
+		re.NodeAddr = "zhangyu.io"
 	})
 	re.InitClient(re.TerminalId, re.Token)
 	return re

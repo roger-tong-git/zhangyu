@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/golang-jwt/jwt"
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -25,13 +27,105 @@ type Node struct {
 	TerminalId    string
 	HttpPort      int
 	QuicPort      int
+	HttpsPort     int
 	EtcdAddr      string
+	Domain        string
 	ClientTimeOut int
 	connectionId  string
 	quicSrv       *srv.Server
 	jwtSingKey    string
 	etcdOp        *etcd.Client
+	transports    *utils.Cache[*httpTransport]
 	utils.Closer
+}
+
+func (n *Node) getTransport(r *http.Request, listen *rpc.Listen) (*httpTransport, error) {
+	key := fmt.Sprintf("%v|%v", listen.TargetTunnelId, r.RemoteAddr)
+	transport := n.transports.Get(key)
+	if transport != nil {
+		n.transports.SetExpire(key, time.Second*20)
+		return transport, nil
+	}
+
+	targetCmdInvoker := n.GetInvoker(listen.TargetClientId)
+	if targetCmdInvoker == nil {
+		return nil, errors.New(fmt.Sprintf("目标客户端[TunnelId:%v]不在线，转发失败", listen.TargetTunnelId))
+	}
+
+	request := rpc.NewInvokeRequest(rpc.InvokePath_Transfer_TargetOut)
+	request.Header["HttpTransKey"] = key
+	request.PutValue(listen)
+	if targetCmdInvoker.WriteRequest(request) != nil {
+		_ = targetCmdInvoker.Close()
+		return nil, errors.New(fmt.Sprintf("目标客户端[TunnelId:%v]不在线，转发失败", listen.TargetTunnelId))
+	}
+
+	transport = NewHttpTransport(key)
+	n.transports.Set(key, transport)
+	n.transports.SetExpire(key, time.Second*20)
+	select {
+	case <-time.After(10 * time.Second):
+		break
+	case <-transport.transChan:
+		break
+	}
+
+	if transport.invoker == nil {
+		n.transports.Delete(key)
+		return nil, errors.New(fmt.Sprintf("转发到目标客户端[TunnelId:%v]遇到未知错误，转发失败", listen.TargetTunnelId))
+	}
+
+	conn := transport.invoker.GetAttach("Conn").(net.Conn)
+	transport.transport = &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	transport.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return conn, nil
+	}
+
+	return transport, nil
+}
+
+func (n *Node) OnHttpRoot(c echo.Context, next echo.HandlerFunc) error {
+	hostUrl, _ := url.Parse(fmt.Sprintf("https://%v", c.Request().Host))
+	host := hostUrl.Hostname()
+	domainInfo := n.etcdOp.GetDomainInfo(host)
+	if domainInfo == nil {
+		return next(c)
+	}
+
+	transfer, err := n.getTransport(c.Request(), domainInfo)
+	if err != nil {
+		return c.String(200, err.Error())
+	}
+
+	r := c.Request()
+	w := c.Response().Writer
+	targetUri, _ := url.Parse(domainInfo.TargetAddr)
+	outReq := &http.Request{}
+	*outReq = *r
+	outReq.Host = targetUri.Host
+	outReq.URL.Host = targetUri.Host
+	outReq.URL.Scheme = targetUri.Scheme
+	var resp *http.Response
+
+	if resp, err = transfer.transport.RoundTrip(outReq); err == nil {
+		for k, v := range resp.Header {
+			value := strings.Join(v, ";")
+			w.Header().Set(k, value)
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, err = io.Copy(w, resp.Body)
+		return err
+	} else {
+		_ = transfer.invoker.Close()
+		n.transports.Delete(transfer.key)
+		return c.String(http.StatusInternalServerError, err.Error())
+	}
 }
 
 func (n *Node) getJwtSignKey() string {
@@ -57,6 +151,13 @@ func (n *Node) GetInvoker(terminalId string) *rpc.Invoker {
 }
 
 func (n *Node) GetContext(terminalId string) context.Context {
+	onlineRec := n.etcdOp.GetOnlineClient(terminalId)
+	if onlineRec != nil {
+		invoker := n.quicSrv.InvokeRoute().GetInvoker(onlineRec.InvokerId)
+		if invoker != nil {
+			return invoker.Ctx()
+		}
+	}
 	return n.quicSrv.InvokeRoute().Ctx()
 }
 
@@ -65,9 +166,22 @@ func (n *Node) OnNewClientRec() *rpc.ClientRec {
 }
 
 func (n *Node) OnCloseClient(invoker *rpc.Invoker) {
-	onlineInfo := n.etcdOp.GetOnlineClient(invoker.TerminalId())
-	if onlineInfo != nil && onlineInfo.InvokerId == invoker.InvokerId() {
-		n.etcdOp.DeleteOnlineClient(invoker.TerminalId())
+	httpTransKeyValue := invoker.GetAttach("HttpTransKey")
+	if httpTransKeyValue != nil {
+		if httpTransKey, ok := httpTransKeyValue.(string); ok {
+			v := n.transports.Get(httpTransKey)
+			if v != nil && v.invoker != nil {
+				_ = v.invoker.Close()
+			}
+			n.transports.Delete(httpTransKey)
+		}
+	}
+
+	if invoker.IsCommandTunnel() {
+		onlineInfo := n.etcdOp.GetOnlineClient(invoker.TerminalId())
+		if onlineInfo != nil && onlineInfo.InvokerId == invoker.InvokerId() {
+			n.etcdOp.DeleteOnlineClient(invoker.TerminalId())
+		}
 	}
 }
 
@@ -122,7 +236,7 @@ func (n *Node) init() {
 	n.POST(HttpPath_Post_Login, n.httpHandler_Login)
 	n.GET(HttpPath_Get_DomainList, n.httpHandler_DomainList)
 	n.AuthPOST(HttpPath_Post_ListenAdd, n.httpHandler_ListenAdd)
-
+	n.AuthPOST(HttpPath_Post_ListenDel, n.httpHandler_ListenDel)
 }
 
 func (n *Node) onInvokerClientLogin(invoker *rpc.Invoker, request *rpc.InvokeRequest) *rpc.InvokeResponse {
@@ -224,13 +338,9 @@ func (n *Node) httpHandler_ListenAdd(c echo.Context) error {
 		return err
 	}
 
-	if req.ListenAddr == "" {
-		return c.JSON(200, utils.ErrResponse("ListenAddr不能为空"))
-	}
-
 	clientId := c.Request().Header.Get("Zhangyu-ClientId")
 
-	if req.ListenClientId != clientId {
+	if req.ListenClientId != "" && req.ListenClientId != clientId {
 		return c.JSON(200, utils.ErrResponse(fmt.Sprintf("无效的客户端ID:%v", req.ListenClientId)))
 	}
 
@@ -247,8 +357,59 @@ func (n *Node) httpHandler_ListenAdd(c echo.Context) error {
 		return c.JSON(200, utils.ErrResponse("AuthCode验证失败"))
 	}
 
-	n.etcdOp.AddListenWithTunnel(req.TargetTunnelId, req.ListenClientId, req.ListenAddr, req.TargetAddr)
-	return c.JSON(200, utils.SuccessResponse(nil))
+	if req.TargetAddr != "" {
+		targetUrl, _ := url.Parse(req.TargetAddr)
+		scheme := targetUrl.Scheme
+		listenHost := ""
+		if req.ListenAddr != "" {
+			listenUrl, _ := url.Parse(req.ListenAddr)
+			listenHost = listenUrl.Hostname()
+		}
+
+		if scheme == "http" || scheme == "https" {
+			if listenHost != "" && strings.HasSuffix(listenHost, n.Domain) {
+				return c.JSON(200, utils.ErrResponse(fmt.Sprintf("添加http/https流量转发失败,不能指定域名[%v]", listenHost)))
+			}
+
+			if listenHost == "" {
+				req.ListenAddr = n.etcdOp.GenerateDomainName()
+			} else {
+				req.ListenAddr = listenHost
+			}
+		}
+
+		if targetUrl.Scheme == "tcp" || targetUrl.Scheme == "udp" {
+			if req.ListenAddr == "" {
+				return c.JSON(200, utils.ErrResponse("ListenAddr不能为空"))
+			}
+		}
+	}
+
+	if req.TargetAddr == "" {
+		if req.ListenAddr == "" {
+			return c.JSON(200, utils.ErrResponse("ListenAddr不能为空"))
+		}
+	}
+
+	listen := n.etcdOp.AddListenWithTunnel(req.TargetTunnelId, clientId, req.ListenAddr, req.TargetAddr)
+
+	listenReq := &rpc.ListenRequest{
+		ListenClientId: clientId,
+		TargetTunnelId: req.TargetTunnelId,
+		TargetAuthCode: req.TargetAuthCode,
+		ListenAddr:     req.ListenAddr,
+		TargetAddr:     req.TargetAddr,
+	}
+
+	listenInvoker := n.GetInvoker(req.ListenClientId)
+	if listenInvoker != nil {
+		invReq := rpc.NewInvokeRequest(rpc.InvokePath_Transfer_ListenAdd)
+		invReq.PutValue(listenReq)
+		if listenInvoker.WriteRequest(invReq) != nil {
+			_ = listenInvoker.Close()
+		}
+	}
+	return c.JSON(200, utils.SuccessResponse(listen))
 }
 
 func (n *Node) httpHandler_Login(c echo.Context) error {
@@ -299,7 +460,7 @@ func (n *Node) onInvokerListenIn(invoker *rpc.Invoker, request *rpc.InvokeReques
 		tunnel := n.etcdOp.GetTunnel(listen.TargetTunnelId)
 		targetCmdInvoker := n.GetInvoker(tunnel.TerminalId)
 		if targetCmdInvoker != nil {
-			request.Path = rpc.InvokePath_Transfer_TargetIn
+			request.Path = rpc.InvokePath_Transfer_TargetOut
 			request.Header["ListenInvokerId"] = invoker.InvokerId()
 			request.Header["ListenClientId"] = invoker.TerminalId()
 			go func() {
@@ -314,10 +475,29 @@ func (n *Node) onInvokerListenIn(invoker *rpc.Invoker, request *rpc.InvokeReques
 
 func (n *Node) onInvokerTransferGo(invoker *rpc.Invoker, request *rpc.InvokeRequest) {
 	listenInvokerId := request.Header["ListenInvokerId"]
+	httpTransKey := request.Header["HttpTransKey"]
+
+	if httpTransKey != "" {
+		transport := n.transports.Get(httpTransKey)
+		if transport != nil {
+			invoker.SetAttach("HttpTransKey", httpTransKey)
+			transport.invoker = invoker
+			transport.transChan <- true
+		}
+		return
+	}
+
 	listenInvoker := n.quicSrv.InvokeRoute().GetInvoker(listenInvokerId)
 	if listenInvoker != nil {
 		invoker.Copy(listenInvoker)
 	}
+}
+
+func (n *Node) httpHandler_ListenDel(c echo.Context) error {
+	//clientId := c.Request().Header.Get("Zhangyu-ClientId")
+	//addr := c.Param("listenAddr")
+
+	return nil
 }
 
 func NewNode(ctx context.Context) *Node {
@@ -325,8 +505,18 @@ func NewNode(ctx context.Context) *Node {
 	utils.ReadJsonSetting("node.json", re, func() {
 		re.QuicPort = 18888
 		re.HttpPort = 18888
+		re.HttpsPort = 18889
+
 		re.EtcdAddr = "127.0.0.1:2379"
 		re.TerminalId = uuid.New().String()
+	})
+
+	re.transports = utils.NewCache[*httpTransport](re.Ctx())
+	re.transports.SetDeleteHandler(func(key string) {
+		v := re.transports.Get(key)
+		if v != nil && v.invoker != nil {
+			_ = v.invoker.Close()
+		}
 	})
 
 	re.SetCtx(ctx)
@@ -337,7 +527,13 @@ func NewNode(ctx context.Context) *Node {
 	if re.HttpPort == 0 {
 		re.HttpPort = 18888
 	}
-	re.quicSrv = srv.NewServer(re.Ctx(), re.QuicPort, re.HttpPort, rpc.ServicePath, re)
+	if re.HttpsPort == 0 {
+		re.HttpsPort = 18889
+	}
+
+	utils.SaveJsonSetting("node.json", re)
+
+	re.quicSrv = srv.NewServer(re.Ctx(), re.QuicPort, re.HttpPort, re.HttpsPort, rpc.ServicePath, re)
 
 	endPoints := strings.Split(re.EtcdAddr, ",")
 	if len(endPoints) > 0 {
@@ -350,7 +546,7 @@ func NewNode(ctx context.Context) *Node {
 			log.Panicln("etcd服务地址不正确")
 		}
 
-		re.etcdOp = etcd.NewEtcdOp(re.Ctx(), re.EtcdAddr)
+		re.etcdOp = etcd.NewEtcdOp(re.Ctx(), re.EtcdAddr, re.Domain)
 		nodeAddr := fmt.Sprintf("%v:%v", localIP, re.QuicPort)
 		nodeInfo := &rpc.NodeInfo{NodeAddr: nodeAddr}
 		nodeInfo.TerminalId = re.TerminalId

@@ -38,6 +38,8 @@ type ServerAdapter interface {
 	OnNewClientRec() *rpc.ClientRec
 
 	OnCloseClient(invoker *rpc.Invoker)
+
+	OnHttpRoot(c echo.Context, next echo.HandlerFunc) error
 }
 
 type Server struct {
@@ -132,7 +134,11 @@ func (s *Server) upgradeWebTransport(c echo.Context) error {
 		log.Println(err)
 		return err
 	}
-	ctx := s.adapter.GetContext(terminalId)
+
+	ctx := s.Ctx()
+	if !isCmdTrans {
+		s.adapter.GetContext(terminalId)
+	}
 	//分配connectionId给新的连接
 	invokerId := uuid.New().String()
 	var invoker = s.invokeRoute.AddAcceptInvoker(invokerId, terminalId, ctx, stream)
@@ -152,7 +158,7 @@ func (s *Server) upgradeWebTransport(c echo.Context) error {
 	invoker.SetRemoteAddr(remoteAddr)
 	invoker.SetClientIP(utils.GetRealRemoteAddr(r))
 	invoker.SetAttach("Session", session)
-	invoker.SetAttach("Conn", quic.NewConnWrapper(stream, session))
+	invoker.SetAttach("Conn", quic.NewConnWrapper(stream, session, invoker))
 	invoker.SetReadErrorHandler(func(err error) {
 		_ = invoker.Close()
 	})
@@ -163,8 +169,8 @@ func (s *Server) upgradeWebTransport(c echo.Context) error {
 		_ = invoker.ReadWriter().Close()
 		_ = session.CloseWithError(0, "")
 		s.invokeRoute.RemoveInvoker(invokerId)
+		s.adapter.OnCloseClient(invoker)
 		if isCmdTrans {
-			s.adapter.OnCloseClient(invoker)
 			log.Println(fmt.Sprintf("已关闭客户端[%v]连接", invokerId))
 		}
 	})
@@ -213,12 +219,23 @@ func (s *Server) RemoveRpcHandler(path string) {
 	s.invokeRoute.RemoveRpcHandler(path)
 }
 
-func NewServer(ctx context.Context, quicPort int, httpPort int, quicPath string, adapter ServerAdapter) *Server {
+func (s *Server) httpRoot(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		if c.Request().RequestURI == s.quicPath {
+			return next(c)
+		}
+		return s.adapter.OnHttpRoot(c, next)
+	}
+}
+
+func NewServer(ctx context.Context, quicPort int, httpPort int, httpsPort int, quicPath string, adapter ServerAdapter) *Server {
 	re := &Server{adapter: adapter, quicPort: quicPort, httpPort: httpPort, quicPath: quicPath}
 	re.SetCtx(ctx)
 	re.invokeRoute = rpc.NewInvokeRoute(re.Ctx())
 	re.invokeRoute.SetLeaseSeconds(re.LeaseSeconds())
-	re.generateTLSConfig()
+	if !utils.FileExists("node.pem") || !utils.FileExists("node.key") {
+		re.generateTLSConfig()
+	}
 
 	certs := make([]tls.Certificate, 1)
 	certs[0], _ = tls.LoadX509KeyPair("node.pem", "node.key")
@@ -227,6 +244,7 @@ func NewServer(ctx context.Context, quicPort int, httpPort int, quicPath string,
 	}
 
 	re.httpRouter = echo.New()
+	re.httpRouter.Use(re.httpRoot)
 	re.httpRouter.Any(quicPath, re.upgradeWebTransport)
 
 	//初始化http3服务
@@ -253,6 +271,11 @@ func NewServer(ctx context.Context, quicPort int, httpPort int, quicPath string,
 	go func() {
 		log.Println(fmt.Sprintf("HTTP[:%v]服务启动", httpPort))
 		_ = http.ListenAndServe(fmt.Sprintf(":%v", httpPort), re.httpRouter)
+	}()
+
+	go func() {
+		log.Println(fmt.Sprintf("HTTPS[:%v]服务启动", httpsPort))
+		_ = http.ListenAndServeTLS(fmt.Sprintf(":%v", httpsPort), "node.pem", "node.key", re.httpRouter)
 	}()
 
 	return re
