@@ -1,8 +1,9 @@
 package utils
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -49,6 +50,20 @@ func newLogFileWriter(filePrefix string) *logFileWriter {
 	return &logFileWriter{filePrefix: filePrefix}
 }
 
+func IntToBytes(n int) []byte {
+	data := int64(n)
+	buffer := bytes.NewBuffer([]byte{})
+	_ = binary.Write(buffer, binary.BigEndian, data)
+	return buffer.Bytes()
+}
+
+func BytesToInt(bys []byte) int {
+	buffer := bytes.NewBuffer(bys)
+	var data int64
+	_ = binary.Read(buffer, binary.BigEndian, &data)
+	return int(data)
+}
+
 func (l *logFileWriter) Write(p []byte) (n int, err error) {
 	defer l.logFileWriterLock.Unlock()
 	l.logFileWriterLock.Lock()
@@ -86,38 +101,4 @@ func (l *logFileWriter) Write(p []byte) (n int, err error) {
 	}()
 
 	return logfile.Write(p)
-}
-
-func ReadBytes(reader io.Reader, readLen int) (*[]byte, error) {
-	b := make([]byte, readLen)
-	r := make([]byte, 0)
-	totalRead := 0
-	for {
-		if readSize, err := reader.Read(b); err != nil {
-			return nil, err
-		} else {
-			r = append(r, b[:readSize]...)
-			totalRead += readSize
-			if totalRead >= readLen {
-				break
-			}
-		}
-	}
-	return &r, nil
-}
-
-func WriteBytes(writer io.Writer, b []byte) error {
-	totalWrite := 0
-	writeLen := len(b)
-	for {
-		if l, err := writer.Write(b[totalWrite:]); err != nil {
-			return err
-		} else {
-			totalWrite += l
-			if totalWrite >= writeLen {
-				break
-			}
-		}
-	}
-	return nil
 }
