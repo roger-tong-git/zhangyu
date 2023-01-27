@@ -5,8 +5,7 @@ import (
 	"github.com/roger-tong-git/zhangyu/app/client"
 	"github.com/roger-tong-git/zhangyu/utils"
 	"log"
-	"net/http"
-	_ "net/http/pprof"
+	//_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,11 +14,12 @@ import (
 
 func main() {
 	defer utils.PrintError()
+	utils.SetLogFile("client")
 	ctx := context.Background()
 	cli := client.NewClient(ctx)
-	go func() {
-		_ = http.ListenAndServe("0.0.0.0:6060", nil)
-	}()
+	//go func() {
+	//	_ = http.ListenAndServe("0.0.0.0:6060", nil)
+	//}()
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)

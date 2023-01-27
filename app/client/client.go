@@ -20,7 +20,8 @@ type Client struct {
 	HeartBeatSeconds int    `json:"heartBeatSeconds,omitempty"`
 	TerminalId       string `json:"terminalId,omitempty"`
 	Token            string `json:"token,omitempty"`
-	TunnelId         string `json:"-"`
+	TunnelId         string
+	AuthCode         string
 	ConnectionId     string `json:"-"`
 	client           *cli.Client
 	utils.Closer     `json:"-"`
@@ -232,6 +233,7 @@ func (c *Client) login() {
 	rec := &rpc.ClientRec{}
 	if resp.GetValue(rec) {
 		c.TunnelId = rec.TunnelId
+		c.AuthCode = rec.AuthCode
 		log.Println(fmt.Sprintf("通道[%v]初始化成功,验证码[%v]", rec.TunnelId, rec.AuthCode))
 	}
 	utils.SaveJsonSetting("client.json", c)

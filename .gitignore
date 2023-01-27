@@ -12,3 +12,5 @@ cmd/node/server.key
 cmd/node/server.pem
 cmd/node/server.pem
 cmd/node/server.key
+/cmd/node/logs/
+/cmd/client/logs/
